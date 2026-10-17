@@ -1,0 +1,48 @@
+{
+  "course_code": "DSE-202",
+  "quiz_title": "Quiz 4: Polyglot & General Assessment (Python, SQL & Algorithms)",
+  "default_language": "auto",
+  "questions": [
+    {
+      "question_id": "Q1",
+      "title": "Subarray Sum Equals K (Python / C / C++ / Any)",
+      "language": "auto",
+      "execution_mode": "auto",
+      "problem_statement": "Given an integer N, a target integer K on the first line, and N space-separated integers on the second line, print the number of contiguous subarrays whose sum equals K.\n\n### Input Format\nLine 1: `N K`\nLine 2: `a_1 a_2 ... a_N`\n\n### Output Format\nSingle integer: count of subarrays summing to K.",
+      "grading_rubric": "GREEN for O(N) prefix-sum hashmap or clean loop passing all tests. BLUE for creative generator/itertools/accumulator approach. RED for O(N^2) timeout, off-by-one, or hardcoded outputs.",
+      "topic_tags": ["arrays", "hashmap", "prefix-sum", "loops"],
+      "expected_complexity": "O(N)",
+      "forbidden_constructs": [],
+      "test_cases": [
+        {"input_data": "3 2\n1 1 1\n", "expected_output": "2", "is_sample": true},
+        {"input_data": "3 3\n1 2 3\n", "expected_output": "2", "is_sample": true},
+        {"input_data": "5 0\n1 -1 1 -1 1\n", "expected_output": "6", "is_sample": false},
+        {"input_data": "4 5\n5 0 5 0\n", "expected_output": "6", "is_sample": false}
+      ]
+    },
+    {
+      "question_id": "Q2",
+      "title": "Department Second Highest Salary (SQL Query)",
+      "language": "sql",
+      "execution_mode": "llm_only",
+      "problem_statement": "Given table `Employees(id INT, name TEXT, department_id INT, salary INT)`, write an SQL query that returns `(department_id, second_highest_salary)` for every department, handling ties via DENSE_RANK or distinct subquery.",
+      "grading_rubric": "BLUE if uses DENSE_RANK() OVER (PARTITION BY department_id ORDER BY salary DESC). GREEN if uses correlated subquery with MAX(salary) < MAX. RED if forgets PARTITION BY / GROUP BY department_id or fails when salaries tie.",
+      "topic_tags": ["sql", "window-functions", "aggregation"],
+      "expected_complexity": "O(N log N)",
+      "forbidden_constructs": [],
+      "test_cases": []
+    },
+    {
+      "question_id": "Q3",
+      "title": "Algorithm Design & Complexity Justification (Markdown / Text / Code)",
+      "language": "text",
+      "execution_mode": "llm_only",
+      "problem_statement": "Explain how to detect a cycle in a directed graph in O(V + E) time and state the space complexity. You may submit prose (.txt/.md) or code/pseudocode.",
+      "grading_rubric": "GREEN for standard 3-color DFS (unvisited/visiting/visited) or Kahn's topological sort (indegree queue) with O(V + E) time and O(V) space. BLUE for Tarjan's SCC or iterative DFS state machine analysis. RED if confuses undirected visited check with directed back-edge detection.",
+      "topic_tags": ["graphs", "dfs", "complexity"],
+      "expected_complexity": "O(V + E)",
+      "forbidden_constructs": [],
+      "test_cases": []
+    }
+  ]
+}
