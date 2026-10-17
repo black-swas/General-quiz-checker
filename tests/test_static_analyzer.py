@@ -246,3 +246,26 @@ def test_function_only_submission_is_detected():
     py_func = "def add(a, b):\n    return a + b\n"
     assert analyze_c_submission(c_func, language="c").is_function_only is True
     assert analyze_c_submission(py_func, language="python").is_function_only is True
+
+
+def test_python_ast_security_catches_eval_exec_and_reflection():
+    code_eval = "x = eval('__import__(\"os\").system(\"ls\")')\n"
+    res = analyze_c_submission(code_eval, language="python")
+    assert any("Dynamic code execution via eval" in v for v in res.security_violations)
+
+    code_getattr = "fn = getattr(__builtins__, 'eval')\nfn('1+1')\n"
+    res_getattr = analyze_c_submission(code_getattr, language="python")
+    assert any("Dangerous reflection" in v for v in res_getattr.security_violations)
+
+
+def test_python_ast_security_catches_subclasses_traversal():
+    code_sub = "classes = ().__class__.__base__.__subclasses__()\n"
+    res = analyze_c_submission(code_sub, language="python")
+    assert any("__subclasses__" in v for v in res.security_violations)
+
+
+def test_cpp_stl_approach_notes_are_detected():
+    cpp_code = "#include <vector>\n#include <algorithm>\nint main() {\n    std::vector<int> v = {3, 1, 2};\n    std::sort(v.begin(), v.end());\n    return 0;\n}\n"
+    res = analyze_c_submission(cpp_code, language="cpp")
+    assert any("vector" in n.lower() for n in res.uncommon_construct_notes)
+    assert any("algorithm" in n.lower() for n in res.uncommon_construct_notes)

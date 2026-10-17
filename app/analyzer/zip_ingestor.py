@@ -275,6 +275,8 @@ def _folder_identity(folder: str) -> Optional[str]:
 def parse_roll_and_question(path_hint: str, zip_context: str = "") -> Tuple[Optional[str], Optional[str]]:
     """Student identifier and question id (Q1..Qn) from a path inside an archive."""
     roll, q_id, _, _ = _parse_path(path_hint, zip_context)
+    if q_id is None:
+        return None, None
     return roll, q_id
 
 
@@ -302,7 +304,19 @@ def _parse_path(path_hint: str, zip_context: str = "") -> Tuple[Optional[str], O
                 q_id, roll, source = f_q, f_roll, "folder"
                 break
     if q_id is None:
+        if _plausible_roll(stem) and any(c.isdigit() for c in stem):
+            return _clean_roll(stem), None, decorated, "file"
+        for folder in reversed(dir_parts):
+            found = _folder_identity(folder)
+            if found:
+                return found, None, decorated, "folder"
+        if zip_context:
+            stem_ctx = os.path.splitext(os.path.basename(zip_context))[0]
+            found = _folder_identity(stem_ctx)
+            if found:
+                return found, None, decorated, "zip"
         return None, None, decorated, None
+
     if roll:
         return roll, q_id, decorated, source
 
@@ -316,6 +330,7 @@ def _parse_path(path_hint: str, zip_context: str = "") -> Tuple[Optional[str], O
         if found:
             return found, q_id, decorated, "zip"
     return None, q_id, decorated, None
+
 
 
 def _folder_roll(path_hint: str) -> Optional[str]:
@@ -438,8 +453,26 @@ def _header_identity(text: str) -> Tuple[Optional[str], Optional[str]]:
     return roll, name
 
 
+_HEADER_Q_RE = re.compile(
+    rf"(?:^|[,;|\s(])(?:question|ques|que|qn|qno|q|problem|prob|task|exercise|ex)\s*[:=\-\u2013\u2014#.]*\s*(?P<n>\d{{1,2}})\b",
+    re.IGNORECASE,
+)
+
+
+def _header_question(text: str) -> Optional[str]:
+    """Detect if a student specified their question number in leading file comments (e.g. // Question 2)."""
+    lines = _header_comment_lines(text, limit=30)
+    for line in lines:
+        m = _HEADER_Q_RE.search(line)
+        if m:
+            n = int(m.group("n"))
+            if 1 <= n <= settings.max_questions_per_paper:
+                return f"Q{n}"
+    return None
+
+
 def _decode_source(raw: bytes, ext: str = "") -> str:
-    """Bytes -> text for UTF-8 (with/without BOM), UTF-16/32 (PowerShell, Notepad), Windows-1252, and .ipynb notebooks."""
+    """Bytes -> text for UTF-8 (with/without BOM), UTF-16/32, Windows-1252/Latin-1, and .ipynb notebooks."""
     if raw.startswith(codecs.BOM_UTF8):
         text = raw[3:].decode("utf-8", errors="replace")
     elif raw.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
@@ -453,8 +486,12 @@ def _decode_source(raw: bytes, ext: str = "") -> str:
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            text = raw.decode("cp1252", errors="replace")
+            try:
+                text = raw.decode("cp1252")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1", errors="replace")
     text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+
 
     if ext == ".ipynb":
         try:
@@ -500,8 +537,9 @@ def _is_ignored_path(path_hint: str) -> bool:
 
 
 def extract_student_submissions(
-    uploaded_files: List[Tuple[str, bytes]],
+    uploaded_files: List[Tuple[str, Any]],
     allowed_extensions: Optional[Set[str]] = None,
+    single_question_fallback: Optional[str] = None,
 ) -> Dict[str, Any]:
     students: Dict[str, Dict[str, Dict[str, str]]] = {}
     warnings: List[str] = []
@@ -514,7 +552,7 @@ def extract_student_submissions(
     counters = {"c_files": 0, "uncompressed": 0, "processed": 0, "unknown": 0, "order": 0}
     valid_exts = {e.lower() for e in allowed_extensions} if allowed_extensions else SUPPORTED_EXTENSIONS
 
-    total_upload = sum(len(content) for _, content in uploaded_files)
+    total_upload = sum(os.path.getsize(c) if isinstance(c, (str, bytes, os.PathLike)) and not isinstance(c, (bytes, bytearray)) else len(c) for _, c in uploaded_files)
     if total_upload > settings.max_upload_bytes:
         raise ZipIngestionError(
             f"Upload ({total_upload / 1048576:.1f} MB) exceeds the {settings.max_upload_bytes / 1048576:.0f} MB limit."
@@ -547,19 +585,35 @@ def extract_student_submissions(
             note_other(ext, path_hint)
             return
 
+        text = _decode_source(raw, ext)
+        if not text.strip():
+            warnings.append(f"'{path_hint}' is empty.")
+
         roll, q_id, decorated, source = _parse_path(path_hint, zip_context)
+        if not q_id:
+            h_q = _header_question(text)
+            if h_q:
+                q_id = h_q
+                source = source or "header"
+            elif single_question_fallback and (
+                (roll and (any(c.isdigit() for c in roll) or source in ("folder", "zip")))
+                or ext not in (".txt", ".md", ".markdown", ".json", ".csv", ".yaml", ".yml", ".xml", ".html", ".css")
+            ):
+                q_id = single_question_fallback
+                source = source or "fallback"
+
         if not q_id:
             if ext in (".txt", ".md", ".markdown", ".json", ".csv", ".yaml", ".yml", ".xml", ".html", ".css"):
                 ignored_other[ext] = ignored_other.get(ext, 0) + 1
                 return
+
             warnings.append(f"Unrecognised submission filename '{path_hint}' (expected something like que1{ext} or 25104_que1{ext}); skipped.")
             return
+
         if not 1 <= int(q_id[1:]) <= settings.max_questions_per_paper:
             warnings.append(f"'{path_hint}' refers to {q_id}, outside 1..{settings.max_questions_per_paper}; skipped.")
             return
-        text = _decode_source(raw, ext)
-        if not text.strip():
-            warnings.append(f"'{path_hint}' is empty.")
+
         lang = detect_language(basename, text)
         h_roll, h_name = _header_identity(text)
         records.append({"path": path_hint, "basename": basename, "context": zip_context, "mtime": mtime, "text": text,
@@ -646,12 +700,15 @@ def extract_student_submissions(
                 f"Decompressed data exceeds {settings.max_uncompressed_bytes / 1048576:.0f} MB (possible zip bomb)."
             )
 
-    def process_zip(zip_name: str, data: bytes, context: str, depth: int) -> None:
+    def process_zip(zip_name: str, data: Any, context: str, depth: int) -> None:
         if depth > settings.max_nesting_depth:
             warnings.append(f"Skipped nested archive '{zip_name}' (deeper than {settings.max_nesting_depth} levels).")
             return
         try:
-            zf = zipfile.ZipFile(io.BytesIO(data))
+            if isinstance(data, (str, os.PathLike)):
+                zf = zipfile.ZipFile(str(data))
+            else:
+                zf = zipfile.ZipFile(io.BytesIO(data))
         except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError):
             warnings.append(f"Corrupted ZIP skipped: {zip_name}")
             return
@@ -700,18 +757,31 @@ def extract_student_submissions(
             continue
         lower = base.lower()
         ext = os.path.splitext(lower)[1]
+        is_path = isinstance(content, (str, os.PathLike))
+
         if lower.endswith(".zip"):
             process_zip(base, content, base, 1)
         elif ext in valid_exts and not CODE_DOUBLE_EXT_RE.search(lower):
-            if len(content) > settings.max_single_file_bytes:
+            c_size = os.path.getsize(content) if is_path else len(content)
+            if c_size > settings.max_single_file_bytes:
                 warnings.append(f"Skipped '{base}': larger than the per-file limit.")
                 continue
-            account(len(content))
-            register_submission_file(norm, "", content)
+            if is_path:
+                try:
+                    with open(content, "rb") as f:
+                        raw_data = f.read(settings.max_single_file_bytes + 1)
+                except OSError:
+                    warnings.append(f"Could not read upload file '{base}'.")
+                    continue
+            else:
+                raw_data = content
+            account(len(raw_data))
+            register_submission_file(norm, "", raw_data)
         elif lower.endswith(UNSUPPORTED_ARCHIVES):
             warnings.append(f"Skipped '{base}': only .zip archives and supported source/text files are accepted (re-zip it).")
         else:
             note_other(ext, norm)
+
 
     resolve_identities()
     place_records()

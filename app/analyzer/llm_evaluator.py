@@ -485,10 +485,28 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
     nonce = secrets.token_hex(6)
     system = build_system_prompt(question, build_calibration_block(question), nonce)
     headers = {"x-api-key": settings.anthropic_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-    size = max(1, settings.llm_batch_size)
-    batches = [eligible[i:i + size] for i in range(0, len(eligible), size)]
+
+    # Dynamic batching: bound both item count and total payload characters for optimal latency & context management
+    max_batch_size = max(1, settings.llm_batch_size)
+    max_batch_chars = 16000
+    batches: List[List[SubmissionEvaluation]] = []
+    cur_batch: List[SubmissionEvaluation] = []
+    cur_chars = 0
+
+    for item in eligible:
+        item_chars = len(item.raw_code)
+        if cur_batch and (len(cur_batch) >= max_batch_size or (cur_chars + item_chars > max_batch_chars)):
+            batches.append(cur_batch)
+            cur_batch = []
+            cur_chars = 0
+        cur_batch.append(item)
+        cur_chars += item_chars
+    if cur_batch:
+        batches.append(cur_batch)
+
     semaphore = asyncio.Semaphore(max(1, settings.llm_concurrency))
-    async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
+    limits = httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=30.0)
+    async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds, limits=limits) as client:
         await asyncio.gather(*(
             _review_batch(client, b, by_roll, system, nonce, headers, report, semaphore) for b in batches
         ))

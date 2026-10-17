@@ -20,6 +20,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,20 +34,32 @@ except ImportError:  # pragma: no cover - only on non-POSIX development machines
 from app.config import settings
 from app.schemas import GccTestResult, TestCase
 
-SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LC_ALL": "C", "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1"}
+if os.name == "nt":
+    SAFE_ENV = {
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
+        "COMSPEC": os.environ.get("COMSPEC", "cmd.exe"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+else:
+    SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LC_ALL": "C", "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1"}
+
 MAX_STDIN_BYTES = 49152  # stays below the 64 KiB pipe buffer so writing never blocks
 _PATH_RE = re.compile(r"(?<![\w\"'.])(?:/[\w.\-]+){2,}")
 
 
 def gcc_available() -> bool:
-    return shutil.which("gcc") is not None
+    return (shutil.which("gcc") or shutil.which("clang")) is not None
 
 
 def sandbox_runtimes() -> Dict[str, bool]:
+    py_found = bool(shutil.which("python3") or shutil.which("python"))
+    gcc_found = bool(shutil.which("gcc") or shutil.which("clang") or shutil.which("cl"))
+    gpp_found = bool(shutil.which("g++") or shutil.which("clang++") or gcc_found)
     return {
-        "c": shutil.which("gcc") is not None,
-        "cpp": (shutil.which("g++") or shutil.which("gcc")) is not None,
-        "python": shutil.which("python3") is not None,
+        "c": gcc_found,
+        "cpp": gpp_found,
+        "python": py_found,
         "bash": shutil.which("bash") is not None,
         "javascript": shutil.which("node") is not None,
     }
@@ -60,40 +73,90 @@ def normalize_output(text: str) -> str:
     return "\n".join(line.strip() for line in text.strip().splitlines() if line.strip())
 
 
-def outputs_match(expected: str, actual: str) -> bool:
-    """Exact normalized match, plus 1e-6 tolerance when tokens are floating-point numbers (e.g. 3.141590 vs 3.14159)."""
+def _try_float(s: str) -> Optional[float]:
+    try:
+        val = float(s)
+        if math.isnan(val):
+            return None
+        return val
+    except (ValueError, TypeError):
+        return None
+
+
+def outputs_match(
+    expected: str,
+    actual: str,
+    rel_tol: Optional[float] = None,
+    abs_tol: Optional[float] = None,
+) -> bool:
+    """Exact normalized match, plus float tolerance when tokens are numbers (including scientific notation)."""
     if expected == actual:
         return True
+
+    rel_tolerance = float(rel_tol if rel_tol is not None else settings.float_rel_tol)
+    abs_tolerance = float(abs_tol if abs_tol is not None else settings.float_abs_tol)
+
     exp_lines = expected.splitlines()
     act_lines = actual.splitlines()
-    if len(exp_lines) != len(act_lines) or not exp_lines:
-        return False
-    has_float = False
-    for el, al in zip(exp_lines, act_lines):
-        etoks = el.split()
-        atoks = al.split()
-        if len(etoks) != len(atoks) or not etoks:
-            return False
-        for et, at in zip(etoks, atoks):
-            if et == at:
-                continue
-            if "." in et or "." in at:
-                try:
-                    ef, af = float(et), float(at)
-                    if math.isclose(ef, af, rel_tol=1e-6, abs_tol=1e-6):
+
+    # Strategy 1: line-by-line token comparison
+    if len(exp_lines) == len(act_lines) and exp_lines:
+        lines_match = True
+        has_float = False
+        for el, al in zip(exp_lines, act_lines):
+            etoks = el.split()
+            atoks = al.split()
+            if len(etoks) != len(atoks) or not etoks:
+                lines_match = False
+                break
+            for e_tok, a_tok in zip(etoks, atoks):
+                if e_tok == a_tok:
+                    continue
+                if e_tok.lower() == a_tok.lower() and e_tok.lower() in ("true", "false", "yes", "no", "null", "none"):
+                    continue
+                ef, af = _try_float(e_tok), _try_float(a_tok)
+                if ef is not None and af is not None:
+                    if math.isinf(ef) and math.isinf(af) and (ef > 0) == (af > 0):
+                        continue
+                    if math.isclose(ef, af, rel_tol=rel_tolerance, abs_tol=abs_tolerance):
                         has_float = True
                         continue
-                except ValueError:
-                    pass
-            return False
-    return has_float
+                lines_match = False
+                break
+            if not lines_match:
+                break
+        if lines_match:
+            return True
+
+    # Strategy 2: whole token stream comparison (handles line wrapping differences)
+    exp_all_toks = expected.split()
+    act_all_toks = actual.split()
+    if len(exp_all_toks) == len(act_all_toks) and exp_all_toks:
+        all_match = True
+        for e_tok, a_tok in zip(exp_all_toks, act_all_toks):
+            if e_tok == a_tok:
+                continue
+            if e_tok.lower() == a_tok.lower() and e_tok.lower() in ("true", "false", "yes", "no", "null", "none"):
+                continue
+            ef, af = _try_float(e_tok), _try_float(a_tok)
+            if ef is not None and af is not None:
+                if math.isinf(ef) and math.isinf(af) and (ef > 0) == (af > 0):
+                    continue
+                if math.isclose(ef, af, rel_tol=rel_tolerance, abs_tol=abs_tolerance):
+                    continue
+            all_match = False
+            break
+        if all_match:
+            return True
+
+    return False
 
 
 def sanitize_compiler_errors(stderr_text: str, tmpdir: str) -> str:
     """Strip sandbox paths and cap the length. (Dangerous #includes are rejected before compiling.)"""
     if not stderr_text:
         return ""
-    cleaned = stderr_text.replace(tmpdir + "/", "").replace(tmpdir, "")
+    cleaned = stderr_text.replace(tmpdir + "/", "").replace(tmpdir + "\\", "").replace(tmpdir, "")
     return "\n".join(_PATH_RE.sub("[path]", line) for line in cleaned.splitlines()[:30])
 
 
@@ -114,19 +177,47 @@ def diagnose_case_failure(expected: str, actual: str, rc: int, timed_out: bool, 
         return "RUNTIME_ERROR"
     if outputs_match(expected, actual):
         return "PASS"
+
+    exp_toks = expected.split()
+    act_toks = actual.split()
+
+    # 1. Single scalar comparison
     try:
         exp_num = int(expected.strip())
         act_num = int(actual.strip())
         if abs(exp_num - act_num) == 1:
             return "OFF_BY_ONE"
-        if exp_num > 2_147_483_647 and act_num < exp_num:
+        if (exp_num > 2_147_483_647 and act_num < exp_num) or (exp_num > 0 and act_num < 0 and exp_num > 2_000_000_000):
             return "INTEGER_OVERFLOW"
     except ValueError:
         pass
+
+    # 2. Multi-token sequence with exactly one mismatch
+    if len(exp_toks) == len(act_toks) and exp_toks:
+        mismatches = [(e, a) for e, a in zip(exp_toks, act_toks) if e != a]
+        if len(mismatches) == 1:
+            e_str, a_str = mismatches[0]
+            try:
+                e_val, a_val = int(e_str), int(a_str)
+                if abs(e_val - a_val) == 1:
+                    return "OFF_BY_ONE"
+                if (e_val > 2_147_483_647 and a_val < e_val) or (e_val > 0 and a_val < 0 and e_val > 2_000_000_000):
+                    return "INTEGER_OVERFLOW"
+            except ValueError:
+                pass
+
+    prompt_words_re = r"(?:enter|input|output|answer|result|sum|count|total|val)\b"
     if expected.lower().replace(" ", "") == actual.lower().replace(" ", ""):
         return "CASE_OR_FORMAT_MISMATCH"
-    if expected.strip() and actual.strip().endswith(expected.strip()) and re.search(r"(?:enter|input|output|answer|result|sum|count)\b", actual, re.I):
+    if expected.strip() and actual.strip().endswith(expected.strip()) and re.search(prompt_words_re, actual, re.I):
         return "CASE_OR_FORMAT_MISMATCH"
+    if actual.strip() and expected.strip().endswith(actual.strip()) and re.search(prompt_words_re, expected, re.I):
+        return "CASE_OR_FORMAT_MISMATCH"
+    if exp_toks and all(tok in act_toks for tok in exp_toks) and any(re.search(prompt_words_re, t, re.I) for t in act_toks):
+        return "CASE_OR_FORMAT_MISMATCH"
+    if act_toks and all(tok in exp_toks for tok in act_toks) and any(re.search(prompt_words_re, t, re.I) for t in exp_toks):
+        return "CASE_OR_FORMAT_MISMATCH"
+
     return "WRONG_ANSWER"
 
 
@@ -157,10 +248,16 @@ def _with_limits(
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the whole process group (the child is its own session leader, so pgid == pid)."""
+    """SIGKILL the process or process group safely on both POSIX and Windows."""
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):
         pass
     try:
         proc.kill()
@@ -172,19 +269,21 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
     """Returns (returncode, stderr, timed_out, run_argv, runtime_label)."""
     lang = (language or "c").lower()
     if lang == "c":
-        cmd = ["gcc", "-O0", "-Wall", "-Wextra", "-fstack-protector-strong", src_path, "-o", bin_path, "-lm"]
+        gcc = shutil.which("gcc") or shutil.which("clang") or "gcc"
+        cmd = [gcc, "-O0", "-Wall", "-Wextra", "-fstack-protector-strong", src_path, "-o", bin_path, "-lm"]
         run_argv = [bin_path]
         label = "gcc"
     elif lang == "cpp":
-        cxx = shutil.which("g++")
+        cxx = shutil.which("g++") or shutil.which("clang++")
         if cxx:
             cmd = [cxx, "-O0", "-Wall", "-Wextra", "-std=c++17", "-fstack-protector-strong", src_path, "-o", bin_path, "-lm"]
         else:
-            cmd = ["gcc", "-x", "c++", "-O0", "-Wall", "-Wextra", "-std=c++17", src_path, "-o", bin_path, "-lstdc++", "-lm"]
+            gcc = shutil.which("gcc") or "gcc"
+            cmd = [gcc, "-x", "c++", "-O0", "-Wall", "-Wextra", "-std=c++17", src_path, "-o", bin_path, "-lstdc++", "-lm"]
         run_argv = [bin_path]
         label = "g++"
     elif lang == "python":
-        py = shutil.which("python3") or "python3"
+        py = sys.executable or shutil.which("python3") or shutil.which("python") or "python3"
         cmd = [py, "-I", "-B", "-m", "py_compile", src_path]
         run_argv = [py, "-I", "-B", src_path]
         label = "python3"
@@ -202,21 +301,27 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
         return 0, "", False, [], "none"
 
     cpu = int(math.ceil(settings.compile_timeout_seconds)) + 2
-    argv, preexec = _with_limits(cmd, cpu, 1536 * 1024 * 1024, 64 * 1024 * 1024)
-    proc = subprocess.Popen(
-        argv,
-        cwd=tmpdir,
-        env=dict(SAFE_ENV, TMPDIR=tmpdir),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=preexec,
-        start_new_session=True,
-    )
+    comp_mem = 384 * 1024 * 1024 if settings.is_low_memory else 1536 * 1024 * 1024
+    argv, preexec = _with_limits(cmd, cpu, comp_mem, 64 * 1024 * 1024)
+
+    popen_kwargs: Dict[str, Any] = {
+        "cwd": tmpdir,
+        "env": dict(SAFE_ENV, TMPDIR=tmpdir),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = preexec
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(argv, **popen_kwargs)
     try:
         _, err = proc.communicate(timeout=settings.compile_timeout_seconds)
     except subprocess.TimeoutExpired:
-        _kill_group(proc)   # kills compiler AND its children (same process group)
+        _kill_group(proc)   # kills compiler AND its children
         try:
             proc.communicate(timeout=2)
         except Exception:
@@ -237,24 +342,60 @@ def execute_binary_capped(
     cpu = max(settings.rlimit_cpu_seconds, int(math.ceil(timeout_sec)) + 1)  # wall clock must fire first
     cmd_list = [bin_path] if isinstance(bin_path, str) else list(bin_path)
     lang = (language or "c").lower()
-    mem_limit = settings.rlimit_as_bytes if lang in ("c", "cpp") else max(settings.rlimit_as_bytes, 512 * 1024 * 1024)
+    if lang in ("c", "cpp"):
+        mem_limit = settings.rlimit_as_bytes
+    elif settings.is_low_memory:
+        mem_limit = min(settings.rlimit_as_bytes * 3 // 2, 384 * 1024 * 1024)
+    else:
+        mem_limit = max(settings.rlimit_as_bytes, 768 * 1024 * 1024)
     nproc_limit = 1 if lang in ("c", "cpp") else max(1, settings.rlimit_nproc)
     argv, preexec = _with_limits(
         cmd_list, cpu, mem_limit, max(0, settings.rlimit_fsize_bytes), nproc_limit
     )
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=tmpdir,
-        env=dict(SAFE_ENV, HOME=tmpdir, TMPDIR=tmpdir),
-        bufsize=0,
-        preexec_fn=preexec,
-        start_new_session=True,
-    )
+
 
     data = input_data.encode("utf-8", errors="replace")[:MAX_STDIN_BYTES]
+
+    popen_kwargs: Dict[str, Any] = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "cwd": tmpdir,
+        "env": dict(SAFE_ENV, HOME=tmpdir, TMPDIR=tmpdir),
+        "bufsize": 0,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = preexec
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(argv, **popen_kwargs)
+
+    # Windows handling: select() does not support pipe file descriptors on Windows.
+    if os.name == "nt":
+        timed_out = truncated = False
+        out_b = err_b = b""
+        try:
+            out_b, err_b = proc.communicate(input=data, timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            try:
+                out_b, err_b = proc.communicate(timeout=0.5)
+            except Exception:
+                pass
+            timed_out = True
+
+        if len(out_b) > max_output_bytes:
+            truncated = True
+            out_b = out_b[:max_output_bytes]
+
+        stdout_text = out_b.decode("utf-8", errors="replace")
+        stderr_text = err_b[:16384].decode("utf-8", errors="replace")
+        returncode = proc.returncode if proc.returncode is not None else -1
+        return stdout_text, stderr_text, returncode, timed_out, truncated
+
+    # POSIX handling: non-blocking selectors streaming loop
     try:
         view = memoryview(data)
         while view:
@@ -348,10 +489,11 @@ def run_gcc_verification(
 
     ext_map = {"c": ".c", "cpp": ".cpp", "python": ".py", "bash": ".sh", "javascript": ".js"}
     src_ext = ext_map.get(lang, ".c")
+    bin_ext = ".exe" if os.name == "nt" and lang in ("c", "cpp") else ".out"
 
     with tempfile.TemporaryDirectory(prefix="iiserb_c_sandbox_") as tmpdir:
         src_path = os.path.join(tmpdir, f"submission{src_ext}")
-        bin_path = os.path.join(tmpdir, "submission.out")
+        bin_path = os.path.join(tmpdir, f"submission{bin_ext}")
         with open(src_path, "w", encoding="utf-8", newline="") as fh:
             fh.write(raw_code)
 
@@ -381,29 +523,35 @@ def run_gcc_verification(
         failure_modes: List[str] = []
         details = []
 
-        def run_case(tc: TestCase) -> Tuple[str, str, int, bool, bool]:
-            return execute_binary_capped(run_argv, tc.input_data, timeout_sec, tmpdir, settings.max_output_bytes, lang)
+        def run_case(item: Tuple[int, TestCase]) -> Tuple[str, str, int, bool, bool]:
+            idx, tc = item
+            case_tmpdir = os.path.join(tmpdir, f"case_{idx}")
+            os.makedirs(case_tmpdir, exist_ok=True)
+            return execute_binary_capped(run_argv, tc.input_data, timeout_sec, case_tmpdir, settings.max_output_bytes, lang)
 
         workers = max(1, min(settings.sandbox_test_workers, len(test_cases)))
+        items = list(enumerate(test_cases, start=1))
         if workers == 1:
-            outcomes = [run_case(tc) for tc in test_cases]
+            outcomes = [run_case(item) for item in items]
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                outcomes = list(pool.map(run_case, test_cases))
+                outcomes = list(pool.map(run_case, items))
 
         for idx, (tc, (out, _err, rc, timed_out, truncated)) in enumerate(zip(test_cases, outcomes), start=1):
-            actual = normalize_output(out[:2048])
+            # Evaluate match on full normalized outputs without pre-truncating to 2048 chars
+            actual = normalize_output(out)
             expected = normalize_output(tc.expected_output)
             ok = (not timed_out) and (not truncated) and rc == 0 and outputs_match(expected, actual)
             fmode = diagnose_case_failure(expected, actual, rc, timed_out, truncated)
             if fmode != "PASS" and fmode not in failure_modes:
                 failure_modes.append(fmode)
 
+            actual_display = actual[:160]
             if timed_out:
                 timed_out_any = True
-                actual = f"[TIMEOUT > {timeout_sec:g}s]"
+                actual_display = f"[TIMEOUT > {timeout_sec:g}s]"
             elif truncated:
-                actual = "[OUTPUT TRUNCATED: > 64 KB]"
+                actual_display = "[OUTPUT TRUNCATED: > 64 KB]"
             elif rc != 0:
                 runtime_err_any = True
 
@@ -420,7 +568,7 @@ def run_gcc_verification(
                 "failure_mode": fmode,
                 "input": tc.input_data[:200],
                 "expected": expected[:160],
-                "actual": actual[:160],
+                "actual": actual_display,
                 "returncode": rc,
             })
 
@@ -437,3 +585,4 @@ def run_gcc_verification(
             case_details=details,
             **base,
         )
+

@@ -731,6 +731,56 @@ def find_security_violations(stripped: str, masked: str, own_names: Set[str], la
     return list(dict.fromkeys(found))
 
 
+def check_python_ast_security(raw_code: str) -> List[str]:
+    """Inspects Python AST to catch dynamic execution, reflection escapes, and restricted module imports."""
+    violations: List[str] = []
+    try:
+        tree = ast.parse(raw_code)
+    except SyntaxError:
+        return []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # 1. eval / exec / compile
+            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile"):
+                violations.append(f"Dynamic code execution via {node.func.id}() is forbidden")
+            # 2. getattr reflection
+            elif isinstance(node.func, ast.Name) and node.func.id == "getattr":
+                target_obj = getattr(node.args[0], "id", "") if len(node.args) >= 1 else ""
+                attr = str(node.args[1].value) if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) else ""
+                if target_obj in ("__builtins__", "builtins", "os", "sys", "subprocess", "posix"):
+                    violations.append(f"Dangerous reflection via getattr({target_obj}, '{attr}')")
+                elif attr and (attr.startswith("__") or attr in ("system", "popen", "environ", "spawn", "eval", "exec", "compile", "__import__")):
+                    violations.append(f"Dangerous reflection via getattr(..., '{attr}')")
+            # 3. __import__ call
+            elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                violations.append("Dynamic module import via __import__() is forbidden")
+            # 4. os / subprocess calls
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in ("system", "popen", "spawn", "exec", "fork", "kill", "remove", "unlink", "rmdir"):
+                    if isinstance(node.func.value, ast.Name) and node.func.value.id in ("os", "subprocess", "posix"):
+                        violations.append(f"Invokes dangerous process/filesystem call {node.func.value.id}.{node.func.attr}()")
+        # 5. Restricted module imports
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                root_pkg = alias.name.split(".")[0]
+                if root_pkg in ("socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal"):
+                    violations.append(f"Import of restricted system module '{alias.name}'")
+        elif isinstance(node, ast.ImportFrom):
+            root_pkg = (node.module or "").split(".")[0]
+            if root_pkg in ("socket", "ctypes", "subprocess", "pty", "shutil", "importlib"):
+                violations.append(f"Import from restricted system module '{node.module}'")
+            elif root_pkg == "os":
+                for alias in node.names:
+                    if alias.name in ("system", "popen", "environ", "remove", "unlink", "rmdir", "kill"):
+                        violations.append(f"Import of dangerous os function '{alias.name}'")
+        # 6. __subclasses__ traversal
+        elif isinstance(node, ast.Attribute) and node.attr == "__subclasses__":
+            violations.append("Sandbox escape attempt via __subclasses__ traversal")
+
+    return list(dict.fromkeys(violations))
+
+
 def detect_prompt_injection(stripped: str, comments: List[str]) -> List[str]:
     haystacks = [
         "\n".join(comments),
@@ -898,7 +948,8 @@ def analyze_c_submission(
     injection = detect_prompt_injection(stripped, comments)
     include_violations, include_notes = analyze_includes(stripped, lang)
     own_names = defined_function_names(masked, lang)
-    security = list(dict.fromkeys(trojan_sec + include_violations + find_security_violations(stripped, masked, own_names, lang)))
+    py_sec = check_python_ast_security(raw_code) if lang == "python" else []
+    security = list(dict.fromkeys(trojan_sec + include_violations + py_sec + find_security_violations(stripped, masked, own_names, lang)))
     syntax_errors = check_syntax_errors(raw_code, masked, lang)
 
     forbidden_hits: List[str] = []
@@ -990,6 +1041,15 @@ def analyze_c_submission(
             notes.append("Uses memoization decorator (@lru_cache / @cache)")
     if lang == "sql" and re.search(r"\bOVER\s*\(\s*(?:PARTITION\s+BY|ORDER\s+BY)\b", stripped, re.I):
         notes.append("Uses SQL window functions (OVER PARTITION/ORDER BY)")
+    if lang in ("cpp", "c++"):
+        if re.search(r"\bstd::vector\b|\bvector\s*<", stripped):
+            notes.append("Uses C++ STL dynamic array (std::vector)")
+        if re.search(r"\bstd::(?:unordered_)?(?:map|set)\b|\b(?:map|set)\s*<", stripped):
+            notes.append("Uses C++ STL associative container (map/set)")
+        if re.search(r"\[\s*&?\s*\]\s*\(", stripped):
+            notes.append("Uses C++ lambda expression")
+        if re.search(r"\bstd::(?:sort|lower_bound|upper_bound|binary_search)\b", stripped):
+            notes.append("Uses C++ STL <algorithm> utility")
     if (not has_loops and not has_recursion and not is_stub and not constant_lines and dynamic_vars
             and any("loop" in t for t in tags)):
         notes.append("Closed-form expression without iteration")

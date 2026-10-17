@@ -264,3 +264,38 @@ def test_rollno_prefix_and_vscode_tempcoderunnerfile_are_handled():
     })
     res = extract_student_submissions([("batch.zip", z)])
     assert students(res) == {"26416": ["Q1", "Q2"]}
+
+
+def test_single_question_fallback_with_bare_roll_filenames(tmp_path):
+    # Common real-life case: 1-question lab exam where students submit 25104.c or 26416.py
+    loose = [("25104.c", C.encode()), ("26416.py", PY.encode())]
+    res = extract_student_submissions(loose, single_question_fallback="Q1")
+    assert students(res) == {"25104": ["Q1"], "26416": ["Q1"]}
+
+
+def test_header_comment_question_detection():
+    # Student submits 25104.c without question in filename, but declares Question 2 in comment
+    code_with_header_q = "// Roll No: 25104\n// Question 2: Binary Search\n" + C
+    res = extract_student_submissions([("25104.c", code_with_header_q.encode())])
+    assert students(res) == {"25104": ["Q2"]}
+
+
+def test_streaming_disk_file_paths(tmp_path):
+    # Verify extract_student_submissions accepts file paths directly for streaming decompression
+    zip_file = tmp_path / "stream_batch.zip"
+    zip_data = make_zip({"25104/que1.c": C, "25105/que1.py": PY})
+    zip_file.write_bytes(zip_data)
+
+    res = extract_student_submissions([("stream_batch.zip", zip_file)])
+    assert students(res) == {"25104": ["Q1"], "25105": ["Q1"]}
+
+
+def test_latin1_and_null_byte_sanitization():
+    # Student code containing Latin-1 characters and null bytes
+    dirty_code = b"// Roll: 25104\n// Que 1\n#include <stdio.h>\x00\nint main() { printf(\"caf\xe9\"); return 0; }\n"
+    res = extract_student_submissions([("25104_q1.c", dirty_code)])
+    assert students(res) == {"25104": ["Q1"]}
+    code = res["students"]["25104"]["Q1"]["code"]
+    assert "\x00" not in code
+    assert "caf" in code
+

@@ -28,9 +28,65 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+from pathlib import Path
+
+
+def _is_render() -> bool:
+    return os.getenv("RENDER", "").strip().lower() in ("true", "1") or bool(os.getenv("RENDER_SERVICE_ID"))
+
+
+def _is_low_memory() -> bool:
+    if os.getenv("LOW_MEMORY_MODE", "").strip().lower() in ("true", "1"):
+        return True
+    if _is_render() and os.getenv("RENDER_INSTANCE_TYPE", "free").lower() in ("free", ""):
+        return True
+    # Check Linux cgroup memory limit if available (Render Free has 512 MB ceiling)
+    try:
+        p2 = Path("/sys/fs/cgroup/memory.max")
+        if p2.is_file():
+            val = p2.read_text().strip()
+            if val.isdigit() and int(val) <= 600 * 1024 * 1024:
+                return True
+        p1 = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        if p1.is_file():
+            val = p1.read_text().strip()
+            if val.isdigit() and int(val) <= 600 * 1024 * 1024:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+_LOW_MEM = _is_low_memory()
+_DEFAULT_PARALLELISM = 2 if _LOW_MEM else max(2, min(os.cpu_count() or 4, 8))
+_DEFAULT_TEST_WORKERS = 2 if _LOW_MEM else 4
+_DEFAULT_AS_BYTES = (256 * 1024 * 1024) if _LOW_MEM else (512 * 1024 * 1024)
+_DEFAULT_LLM_CONCURRENCY = 3 if _LOW_MEM else 6
+_DEFAULT_LLM_BATCH_SIZE = 6 if _LOW_MEM else 8
+_DEFAULT_MAX_JOBS = 4 if _LOW_MEM else 10
+_DEFAULT_DB_PATH = "/tmp/hitl_calibration.db" if (os.name != "nt" and _is_render()) else "./data/hitl_calibration.db"
+
+
 @dataclass
 class Settings:
     app_version: str = "4.1.0"
+    is_render: bool = _is_render()
+    is_low_memory: bool = _LOW_MEM
+
+    # ---- polyglot sandbox (C, C++, Python, Bash, Node/JS when available)
+    enable_gcc_sandbox: bool = _env_bool("ENABLE_GCC_SANDBOX", True)
+    test_timeout_seconds: float = _env_float("GCC_TIMEOUT_SECONDS", 3.0)       # wall clock per test case
+    compile_timeout_seconds: float = _env_float("COMPILE_TIMEOUT_SECONDS", 10.0)
+    rlimit_cpu_seconds: int = _env_int("RLIMIT_CPU_SECONDS", 5)
+    rlimit_as_bytes: int = _env_int("RLIMIT_AS_BYTES", _DEFAULT_AS_BYTES)     # 256MB on low-memory/Render Free, 512MB otherwise
+    rlimit_fsize_bytes: int = _env_int("RLIMIT_FSIZE_BYTES", 0)
+    rlimit_nproc: int = _env_int("RLIMIT_NPROC", 16)
+    max_output_bytes: int = _env_int("MAX_OUTPUT_BYTES", 65536)
+    sandbox_parallelism: int = _env_int("SANDBOX_PARALLELISM", _DEFAULT_PARALLELISM)
+    sandbox_test_workers: int = _env_int("SANDBOX_TEST_WORKERS", _DEFAULT_TEST_WORKERS)       # test cases run at once per submission
+    float_rel_tol: float = _env_float("FLOAT_REL_TOL", 1e-6)
+    float_abs_tol: float = _env_float("FLOAT_ABS_TOL", 1e-6)
+    enable_function_driver_synthesis: bool = _env_bool("ENABLE_FUNCTION_DRIVER_SYNTHESIS", True)
 
     # ---- LLM (primary 4-way evaluator for general/unverified tests; hard integrity flags remain locked)
     anthropic_api_key: str = _env_str("ANTHROPIC_API_KEY")
@@ -38,22 +94,10 @@ class Settings:
     fallback_model: str = _env_str("FALLBACK_MODEL", "claude-haiku-4-5-20251001")
     llm_enabled: bool = _env_bool("LLM_ENABLED", True)
     llm_full_triage: bool = _env_bool("LLM_FULL_TRIAGE", True)
-    llm_batch_size: int = _env_int("LLM_BATCH_SIZE", 8)
-    llm_concurrency: int = _env_int("LLM_CONCURRENCY", 3)
+    llm_batch_size: int = _env_int("LLM_BATCH_SIZE", _DEFAULT_LLM_BATCH_SIZE)
+    llm_concurrency: int = _env_int("LLM_CONCURRENCY", _DEFAULT_LLM_CONCURRENCY)
     llm_timeout_seconds: float = _env_float("LLM_TIMEOUT_SECONDS", 60.0)
     llm_max_retries: int = _env_int("LLM_MAX_RETRIES", 2)
-
-    # ---- polyglot sandbox (C, C++, Python, Bash, Node/JS when available)
-    enable_gcc_sandbox: bool = _env_bool("ENABLE_GCC_SANDBOX", True)
-    test_timeout_seconds: float = _env_float("GCC_TIMEOUT_SECONDS", 3.0)       # wall clock per test case
-    compile_timeout_seconds: float = _env_float("COMPILE_TIMEOUT_SECONDS", 10.0)
-    rlimit_cpu_seconds: int = _env_int("RLIMIT_CPU_SECONDS", 5)
-    rlimit_as_bytes: int = _env_int("RLIMIT_AS_BYTES", 256 * 1024 * 1024)
-    rlimit_fsize_bytes: int = _env_int("RLIMIT_FSIZE_BYTES", 0)
-    rlimit_nproc: int = _env_int("RLIMIT_NPROC", 8)
-    max_output_bytes: int = _env_int("MAX_OUTPUT_BYTES", 65536)
-    sandbox_parallelism: int = _env_int("SANDBOX_PARALLELISM", 2)
-    sandbox_test_workers: int = _env_int("SANDBOX_TEST_WORKERS", 4)       # test cases run at once per submission
 
     # ---- plagiarism & stylometry
     clone_threshold_percent: float = _env_float("CLONE_THRESHOLD_PERCENT", 88.0)
@@ -80,9 +124,9 @@ class Settings:
     rate_limit_feedback_per_minute: int = _env_int("RATE_LIMIT_FEEDBACK_PER_MIN", 120)
 
     # ---- storage / jobs
-    sqlite_db_path: str = _env_str("SQLITE_DB_PATH", "./data/hitl_calibration.db")
+    sqlite_db_path: str = _env_str("SQLITE_DB_PATH", _DEFAULT_DB_PATH)
     job_ttl_seconds: int = _env_int("JOB_TTL_SECONDS", 14400)
-    max_stored_jobs: int = _env_int("MAX_STORED_JOBS", 10)
+    max_stored_jobs: int = _env_int("MAX_STORED_JOBS", _DEFAULT_MAX_JOBS)
 
     @property
     def auth_required(self) -> bool:
@@ -94,3 +138,4 @@ class Settings:
 
 
 settings = Settings()
+

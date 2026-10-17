@@ -1,8 +1,12 @@
 """FastAPI application: JSON API + static single-page UI for polyglot & general quiz evaluation."""
 import asyncio
+import gc
 import json
 import logging
+
+import os
 import re
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -56,9 +60,9 @@ async def lifespan(_app: FastAPI):
     init_hitl_db()
     runtimes = sandbox_runtimes()
     logger.info(
-        "Started v%s | runtimes=%s | llm=%s (%s) | auth=%s | process_hardened=%s",
+        "Started v%s | runtimes=%s | llm=%s (%s) | auth=%s | low_mem=%s | render=%s | process_hardened=%s",
         settings.app_version, runtimes, settings.llm_available, settings.primary_model,
-        "required" if settings.auth_required else "off", hardened,
+        "required" if settings.auth_required else "off", settings.is_low_memory, settings.is_render, hardened,
     )
     if settings.require_auth and not settings.api_auth_token:
         logger.error("REQUIRE_AUTH is set but API_AUTH_TOKEN is empty: all protected endpoints will refuse requests.")
@@ -94,7 +98,7 @@ async def guard_and_harden(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     )
     return response
 
@@ -147,16 +151,48 @@ def parse_question_paper(raw: str) -> QuizPaper:
     return paper
 
 
-async def _read_uploads(archives: List[UploadFile]) -> List[Tuple[str, bytes]]:
+async def _spool_uploads(archives: List[UploadFile]) -> List[Tuple[str, Path]]:
+    """Stream incoming uploads directly to temporary files on disk to prevent RAM ballooning."""
     total = 0
-    uploads: List[Tuple[str, bytes]] = []
+    spooled: List[Tuple[str, Path]] = []
     for archive in archives:
-        data = await archive.read(settings.max_upload_bytes - total + 1)
-        total += len(data)
-        if total > settings.max_upload_bytes:
-            raise HTTPException(413, f"Upload exceeds the {settings.max_upload_bytes // (1024 * 1024)} MB limit.")
-        uploads.append((archive.filename or "upload.zip", data))
-    return uploads
+        fname = archive.filename or "upload.zip"
+        ext = os.path.splitext(fname)[1] or ".tmp"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+        try:
+            while True:
+                chunk = await archive.read(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > settings.max_upload_bytes:
+                    tmp.close()
+                    try:
+                        os.unlink(tmp.name)
+                    except OSError:
+                        pass
+                    for _, p in spooled:
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
+                    raise HTTPException(413, f"Upload exceeds the {settings.max_upload_bytes // (1024 * 1024)} MB limit.")
+                tmp.write(chunk)
+            tmp.close()
+            spooled.append((fname, Path(tmp.name)))
+        except Exception:
+            tmp.close()
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            for _, p in spooled:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            raise
+    return spooled
 
 
 async def _prepare(question_paper_json: str, archives: List[UploadFile]) -> Tuple[QuizPaper, Dict[str, Any]]:
@@ -164,11 +200,25 @@ async def _prepare(question_paper_json: str, archives: List[UploadFile]) -> Tupl
         paper = parse_question_paper(question_paper_json)
     except ValueError as exc:
         raise HTTPException(400, f"Invalid question paper: {exc}")
-    uploads = await _read_uploads(archives)
+
+    single_fallback = paper.questions[0].question_id if len(paper.questions) == 1 else None
+    spooled = await _spool_uploads(archives)
     try:
-        extracted = await asyncio.to_thread(extract_student_submissions, uploads)
+        extracted = await asyncio.to_thread(
+            extract_student_submissions,
+            spooled,
+            single_question_fallback=single_fallback,
+        )
     except ZipIngestionError as exc:
         raise HTTPException(400, str(exc))
+    finally:
+        for _, p in spooled:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        gc.collect()
+
     if extracted["total_c_files"] == 0:
         detail = "No submission files could be matched to students and questions."
         if extracted["warnings"]:
@@ -191,6 +241,7 @@ async def _run_job(job_id: str, paper: QuizPaper, extracted: Dict[str, Any]) -> 
                 jobs.update(job_id, stage=stage, progress=round(min(max(fraction, 0.0), 1.0), 3), message=message)
 
             result = await run_full_quiz_evaluation(paper, extracted, progress=on_progress)
+            gc.collect()
             jobs.update(job_id, status="done", stage="Done", progress=1.0, message="Evaluation complete", result=result)
     except asyncio.CancelledError:
         jobs.update(job_id, status="cancelled", stage="Cancelled", error="Evaluation was cancelled by the user.")
@@ -207,7 +258,14 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "version": settings.app_version, "gcc": gcc_available(), "runtimes": sandbox_runtimes()}
+    return {
+        "status": "ok",
+        "version": settings.app_version,
+        "gcc": gcc_available(),
+        "runtimes": sandbox_runtimes(),
+        "low_memory": settings.is_low_memory,
+        "render": settings.is_render,
+    }
 
 
 @app.get("/api/config")
@@ -215,6 +273,8 @@ def public_config() -> Dict[str, Any]:
     runtimes = sandbox_runtimes()
     return {
         "version": settings.app_version,
+        "is_render": settings.is_render,
+        "is_low_memory": settings.is_low_memory,
         "auth_required": settings.auth_required,
         "sandbox": settings.enable_gcc_sandbox and any(runtimes.values()),
         "runtimes": runtimes,
@@ -228,6 +288,7 @@ def public_config() -> Dict[str, Any]:
             "test_timeout_seconds": settings.test_timeout_seconds,
         },
     }
+
 
 
 # --------------------------------------------------------------------------- sample papers

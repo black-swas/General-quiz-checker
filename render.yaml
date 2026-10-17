@@ -1,17 +1,20 @@
-# Render Blueprint: connect this GitHub repo in Render (New > Blueprint) and it is deployed from here.
+# Render Blueprint for IISER Bhopal Quiz Evaluator
+# Optimized for Render Free Plan (512 MB RAM, ephemeral storage).
 services:
   - type: web
     name: iiserb-quiz-evaluator
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter                  # persistent disks need a paid plan
+    plan: free                     # Render Free Plan (no persistent disk)
     region: singapore
     healthCheckPath: /api/health
     autoDeploy: true
-    disk:
-      name: evaluator-data
-      mountPath: /app/data
-      sizeGB: 1
+    # Note: Render Free Plan does NOT support persistent disks.
+    # If you upgrade to 'plan: starter', you can uncomment the disk block below:
+    # disk:
+    #   name: evaluator-data
+    #   mountPath: /app/data
+    #   sizeGB: 1
     envVars:
       # Secret: you paste this in the Render dashboard (never commit it).
       - key: ANTHROPIC_API_KEY
@@ -30,7 +33,7 @@ services:
       - key: API_AUTH_TOKEN
         generateValue: true
       - key: SQLITE_DB_PATH
-        value: /app/data/hitl_calibration.db
+        value: /tmp/hitl_calibration.db
       - key: CLONE_THRESHOLD_PERCENT
         value: "88"
       - key: CLONE_EXCLUSIVE_MIN_PERCENT
@@ -41,3 +44,4 @@ services:
         value: "104857600"
       - key: MAX_STUDENTS_PER_SESSION
         value: "250"
+

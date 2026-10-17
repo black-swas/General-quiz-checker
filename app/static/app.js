@@ -186,8 +186,14 @@
       h('span', { class: 'pill ' + (c.sandbox ? 'pill-ok' : 'pill-warn'), text: c.sandbox ? `Sandbox ready (${rts})` : 'Sandbox unavailable' }),
       h('span', { class: 'pill ' + (c.llm.available ? 'pill-ok' : ''), text: c.llm.available ? `AI 4-way triage: ${c.llm.model}` : 'AI review off' }),
     );
+    if (c.is_render) {
+      box.append(h('span', { class: 'pill pill-ok', text: 'Render Free (Optimized)' }));
+    } else if (c.is_low_memory) {
+      box.append(h('span', { class: 'pill pill-ok', text: 'Low memory mode' }));
+    }
     if (c.auth_required) box.append(h('span', { class: 'pill ' + (state.token ? 'pill-ok' : 'pill-warn'), text: state.token ? 'Signed in' : 'Token needed' }));
   }
+
 
   function renderHeaderActions() {
     const box = $('headerActions');
@@ -391,8 +397,11 @@
           throw new Error(status.error || 'The evaluation was stopped.');
         }
       } catch (err) {
-        if (err instanceof ApiError && err.status === 0 && ++failures < 6) {
-          await sleep(1200);
+        // Retry across network blips (status 0) or Render proxy gateway hiccups (502, 503, 504)
+        const isTransient = err instanceof ApiError && (err.status === 0 || err.status === 502 || err.status === 503 || err.status === 504);
+        if (isTransient && ++failures < 15) {
+          setProgress(undefined, 'Reconnecting…', `Network blip (${failures}/15) — retrying connection to server…`);
+          await sleep(Math.min(3000, 1000 + failures * 200));
           continue;
         }
         throw err;
@@ -400,6 +409,7 @@
       await sleep(1200);
     }
   }
+
 
   async function cancelActiveJob() {
     if (!state.activeJobId) return;

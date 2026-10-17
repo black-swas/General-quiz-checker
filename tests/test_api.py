@@ -49,13 +49,19 @@ def test_index_and_assets_are_served(client):
 
 def test_security_headers_are_present(client):
     headers = client.get("/").headers
-    assert headers["x-content-type-options"] == "nosniff" and "frame-ancestors 'none'" in headers["content-security-policy"]
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in headers["content-security-policy"]
+    assert "style-src 'self' 'unsafe-inline'" in headers["content-security-policy"]
 
 
 def test_health_and_config(client):
-    assert client.get("/api/health").json()["status"] == "ok"
+    health = client.get("/api/health").json()
+    assert health["status"] == "ok"
+    assert "low_memory" in health and "render" in health
     cfg = client.get("/api/config").json()
-    assert {"auth_required", "sandbox", "runtimes", "llm", "limits"} <= set(cfg) and "api_key" not in json.dumps(cfg).lower()
+    assert {"auth_required", "sandbox", "runtimes", "llm", "limits", "is_render", "is_low_memory"} <= set(cfg)
+    assert "api_key" not in json.dumps(cfg).lower()
+
 
 
 def test_sample_papers_are_listed_and_valid(client):
@@ -217,3 +223,12 @@ def test_recent_jobs_list_and_function_only_submission_routing(client):
     assert "Function-only" in ev["logic_summary"]
     recent = client.get("/api/jobs").json()["jobs"]
     assert any(j["quiz_title"] == "Smoke quiz" for j in recent)
+
+
+def test_single_question_bare_roll_upload_via_api(client):
+    r = client.post("/api/jobs", data={"question_paper_json": json.dumps(PAPER)}, files=upload({"25001.c": GOOD}))
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    status = client.get(f"/api/jobs/{job_id}").json()
+    assert status["status"] in ("queued", "running", "done")
+

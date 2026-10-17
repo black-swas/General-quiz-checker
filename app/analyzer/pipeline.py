@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from app.analyzer.c_static_analyzer import analyze_c_submission
+from app.analyzer.driver_synthesizer import synthesize_driver
 from app.analyzer.gcc_sandbox import gcc_available, run_gcc_verification, runtime_available_for, sandbox_runtimes
 from app.analyzer.llm_evaluator import annotate_question, new_llm_report
 from app.analyzer.plagiarism_engine import (
@@ -66,81 +67,113 @@ async def run_full_quiz_evaluation(
     if not sandbox_on:
         warnings.append("The execution sandbox is disabled or unavailable, so no tests were run in the sandbox.")
 
-    # ---- pass 1: plagiarism per question + cross-question corroboration + stylometric consistency
+    # ---- pass 1: plagiarism per question in parallel + cross-question corroboration + stylometric consistency
     clones_by_q: Dict[str, Dict[str, List[CloneMatch]]] = {}
     previews_by_q: Dict[str, Dict[str, str]] = {}
-    for qi, q in enumerate(questions):
-        notify("Comparing submissions", 0.02 + 0.08 * qi / n_q, f"{q.question_id}: pairwise structural comparison")
+
+    async def run_one_question_plagiarism(qi: int, q):
+        notify("Comparing submissions", 0.02 + 0.08 * (qi + 0.5) / n_q, f"{q.question_id}: pairwise structural comparison")
         submissions = {r: students[r][q.question_id]["code"] for r in rolls if q.question_id in students[r]}
         langs_by_roll = {r: students[r][q.question_id].get("language", "c") for r in rolls if q.question_id in students[r]}
         clone_map, preview_map = await asyncio.to_thread(
             run_question_plagiarism_matrix, q.question_id, submissions, None, langs_by_roll
         )
-        clones_by_q[q.question_id], previews_by_q[q.question_id] = clone_map, preview_map
+        return q.question_id, clone_map, preview_map
+
+    for qid, clone_map, preview_map in await asyncio.gather(*(run_one_question_plagiarism(qi, q) for qi, q in enumerate(questions))):
+        clones_by_q[qid], previews_by_q[qid] = clone_map, preview_map
+
     corroborated_pairs = apply_collusion_corroboration(clones_by_q, len(rolls))
     collusion_pairs = detect_cross_question_collusion(clones_by_q)
     style_notes_by_sub, stylometry_warnings = detect_stylometric_anomalies(students)
 
-    # ---- pass 2: static analysis + polyglot sandbox + triage + 4-way LLM, question by question
+    # ---- pass 2: static analysis + polyglot sandbox + triage + 4-way LLM (pipelined)
     llm_report = new_llm_report()
     semaphore = asyncio.Semaphore(max(1, settings.sandbox_parallelism))
     evaluations: Dict[str, List[SubmissionEvaluation]] = {}
     languages_counter: Counter = Counter()
 
-    for qi, q in enumerate(questions):
-        base, span = 0.10 + 0.88 * qi / n_q, 0.88 / n_q
-        todo = [(r, students[r][q.question_id]) for r in rolls if q.question_id in students[r]]
+    total_submissions = sum(len([r for r in rolls if q.question_id in students[r]]) for q in questions)
+    finished_submissions = 0
 
-        async def evaluate_one(roll: str, meta: Dict[str, str], q=q) -> SubmissionEvaluation:
-            code = meta["code"]
-            file_lang = meta.get("language", "auto")
-            effective_lang = q.language if (q.language and q.language != "auto") else file_lang
-            static = await asyncio.to_thread(analyze_c_submission, code, q, effective_lang)
-            gcc = None
-            exec_mode = getattr(q, "execution_mode", "auto")
-            if static.is_function_only and exec_mode != "sandbox":
-                # LeetCode-style function submission without main() or stdin/stdout driver:
-                # avoid false linker/empty-output failure and let the 4-way LLM evaluator grade it.
-                gcc = GccTestResult(
-                    language=static.language,
-                    runtime_used="none",
-                    compiled=True,
-                    total_count=0,
-                    skipped_reason="Function-only submission (no main/stdin driver); evaluated by AI review",
-                )
-            else:
-                can_run_sandbox = (
-                    sandbox_on
-                    and exec_mode in ("auto", "sandbox")
-                    and not static.is_empty_or_stub
-                    and not static.security_violations
-                    and runtime_available_for(static.language)
-                )
-                if can_run_sandbox:
-                    async with semaphore:
-                        gcc = await asyncio.to_thread(run_gcc_verification, code, q.test_cases, None, static.language)
-            ev = deterministic_triage(
-                roll, q, meta["filename"], code, static, gcc,
-                clones_by_q[q.question_id].get(roll, []), previews_by_q[q.question_id].get(roll, ""),
+    async def evaluate_one(roll: str, meta: Dict[str, str], q) -> SubmissionEvaluation:
+        nonlocal finished_submissions
+        code = meta["code"]
+        file_lang = meta.get("language", "auto")
+        effective_lang = q.language if (q.language and q.language != "auto") else file_lang
+        static = await asyncio.to_thread(analyze_c_submission, code, q, effective_lang)
+        gcc = None
+        exec_mode = getattr(q, "execution_mode", "auto")
+
+        runnable_code = code
+        was_synthesized = False
+        if static.is_function_only and settings.enable_function_driver_synthesis and q.test_cases:
+            synth_code, was_synth = synthesize_driver(code, static.language)
+            if was_synth:
+                runnable_code = synth_code
+                was_synthesized = True
+
+        if static.is_function_only and not was_synthesized and exec_mode != "sandbox":
+            # LeetCode-style function submission without main() or stdin/stdout driver:
+            # avoid false linker/empty-output failure and let the 4-way LLM evaluator grade it.
+            gcc = GccTestResult(
+                language=static.language,
+                runtime_used="none",
+                compiled=True,
+                total_count=0,
+                skipped_reason="Function-only submission (no main/stdin driver); evaluated by AI review",
             )
-            style_note = style_notes_by_sub.get((roll, q.question_id))
-            if style_note:
-                ev.integrity_notes.append(style_note)
-            return ev
+        else:
+            can_run_sandbox = (
+                sandbox_on
+                and exec_mode in ("auto", "sandbox")
+                and not static.is_empty_or_stub
+                and not static.security_violations
+                and runtime_available_for(static.language)
+            )
+            if can_run_sandbox:
+                async with semaphore:
+                    gcc = await asyncio.to_thread(run_gcc_verification, runnable_code, q.test_cases, None, static.language)
+                if was_synthesized and gcc and not gcc.compiled:
+                    # If auto-synthesized driver signature did not match, fall back cleanly to unverified AI review
+                    gcc = GccTestResult(
+                        language=static.language,
+                        runtime_used="none",
+                        compiled=True,
+                        total_count=0,
+                        skipped_reason="Function-only submission (driver signature could not be auto-synthesized); evaluated by AI review",
+                    )
+        ev = deterministic_triage(
+            roll, q, meta["filename"], code, static, gcc,
+            clones_by_q[q.question_id].get(roll, []), previews_by_q[q.question_id].get(roll, ""),
+        )
+        style_note = style_notes_by_sub.get((roll, q.question_id))
+        if style_note:
+            ev.integrity_notes.append(style_note)
+        finished_submissions += 1
+        notify(
+            "Running analysis & tests",
+            0.10 + 0.75 * finished_submissions / max(1, total_submissions),
+            f"{q.question_id}: evaluated {finished_submissions}/{total_submissions} total submissions",
+        )
+        return ev
 
+    async def evaluate_question(q) -> Tuple[str, List[SubmissionEvaluation]]:
+        todo = [(r, students[r][q.question_id]) for r in rolls if q.question_id in students[r]]
         results: List[SubmissionEvaluation] = []
-        for finished, coro in enumerate(asyncio.as_completed([evaluate_one(r, m) for r, m in todo]), start=1):
+        for coro in asyncio.as_completed([evaluate_one(r, m, q) for r, m in todo]):
             ev_res = await coro
             results.append(ev_res)
             languages_counter[ev_res.language] += 1
-            notify("Running analysis & tests", base + span * 0.8 * finished / max(1, len(todo)),
-                   f"{q.question_id}: {finished}/{len(todo)} submissions")
         results.sort(key=lambda e: e.roll_no)
 
         if settings.llm_available:
-            notify("Reviewing with AI evaluator", base + span * 0.85, f"{q.question_id}: reviewing {len(results)} submissions")
-        await annotate_question(q, results, llm_report)
-        evaluations[q.question_id] = results
+            notify("Reviewing with AI evaluator", 0.88, f"{q.question_id}: reviewing {len(results)} submissions")
+            await annotate_question(q, results, llm_report)
+        return q.question_id, results
+
+    for qid, q_results in await asyncio.gather(*(evaluate_question(q) for q in questions)):
+        evaluations[qid] = q_results
 
     # ---- assemble matrix & per-question analytics
     matrix: Dict[str, Dict[str, Dict[str, Any]]] = {r: {} for r in rolls}
