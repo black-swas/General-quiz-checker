@@ -234,3 +234,51 @@ def test_nothing_is_sent_when_the_llm_is_unavailable(monkeypatch):
     report = llm.new_llm_report()
     asyncio.run(llm.annotate_question(QUESTION, [make_eval()], report))
     assert called == [] and report["enabled"] is False and "ANTHROPIC_API_KEY" in report["skipped_reason"]
+
+
+def test_llm_identical_submission_deduplication(monkeypatch, llm_on):
+    seen = []
+
+    def handler(request):
+        body = request.read().decode()
+        seen.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "model": "claude-haiku-5-5",
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": llm.TOOL_NAME,
+                        "input": {
+                            "reviews": [
+                                review("s1", approach="CREATIVE", approach_tag="Bit trick"),
+                                review("s3", approach="STANDARD"),
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+
+    patch_transport(monkeypatch, handler)
+    # s1 and s2 have identical code (CODE); s3 has different code
+    ev1 = make_eval("s1", code=CODE)
+    ev2 = make_eval("s2", code=CODE)
+    ev3 = make_eval("s3", code=CODE + "// extra different line\n")
+    report = llm.new_llm_report()
+
+    asyncio.run(llm.annotate_question(QUESTION, [ev1, ev2, ev3], report))
+
+    # Only s1 and s3 should be sent to the LLM (s2 was deduplicated as a twin of s1)
+    assert len(seen) == 1
+    assert 'roll_no=\\"s1\\"' in seen[0]
+    assert 'roll_no=\\"s2\\"' not in seen[0]
+    assert 'roll_no=\\"s3\\"' in seen[0]
+
+    # Both s1 AND s2 got the creative verdict from s1's review!
+    assert ev1.tab_category == "BLUE" and ev1.uncommon_approach_tag == "Bit trick"
+    assert ev2.tab_category == "BLUE" and ev2.uncommon_approach_tag == "Bit trick"
+    assert ev3.tab_category == "GREEN"
+    assert report["submissions_reviewed"] == 3

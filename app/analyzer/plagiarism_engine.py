@@ -180,18 +180,24 @@ def run_question_plagiarism_matrix(
     previews: Dict[str, str] = {}
     langs = {r: (languages_by_roll or {}).get(r, "c").lower() for r in rolls}
     lang_counts = Counter(langs.values())
+    comments_by_roll: Dict[str, Set[str]] = {}
     for r in rolls:
         toks, lmap, _ = normalize_c_tokens(submissions[r], langs[r])
         toks = toks[:MAX_TOKENS]
         tokens[r], line_maps[r] = toks, lmap
         previews[r] = " ".join(toks[:60]) + (" ..." if len(toks) > 60 else "")
+        _, raw_comments = extract_and_strip_comments(submissions[r], langs[r])
+        comments_by_roll[r] = {c.strip().lower() for c in raw_comments if len(c.strip()) > 8}
     clone_map: Dict[str, List[CloneMatch]] = {r: [] for r in rolls}
 
     sh4 = {r: _shingles(tokens[r], 4) for r in rolls}
     sh5 = {r: _shingles(tokens[r], 5) for r in rolls}
     df: Counter = Counter()
+    sh5_index: Dict[Tuple[str, ...], List[str]] = {}
     for r in rolls:
         df.update(sh4[r])
+        for sh in sh5[r]:
+            sh5_index.setdefault(sh, []).append(r)
 
     # ---- candidate pairs
     candidates: List[Tuple[str, str, float, float, float]] = []   # a, b, seq, jaccard, exclusive%
@@ -199,7 +205,14 @@ def run_question_plagiarism_matrix(
         ta = tokens[a]
         if len(ta) < MIN_COMPARE_TOKENS:
             continue
-        for b in rolls[i + 1:]:
+        # Use inverted shingle index to prune candidates with 0 shared 5-shingles
+        partners: Set[str] = set()
+        for sh in sh5[a]:
+            for b in sh5_index.get(sh, []):
+                if b > a:
+                    partners.add(b)
+
+        for b in sorted(partners):
             if (langs[a] in PROSE_LANGS) != (langs[b] in PROSE_LANGS):
                 continue
             tb = tokens[b]
@@ -211,8 +224,6 @@ def run_question_plagiarism_matrix(
                 seq = 100.0
                 jacc = 100.0
             else:
-                if sh5[a].isdisjoint(sh5[b]):
-                    continue
                 jacc = _jaccard(sh5[a], sh5[b])
                 if jacc < SHINGLE_PREFILTER_PERCENT:
                     continue
@@ -242,7 +253,8 @@ def run_question_plagiarism_matrix(
         csize = cluster_sizes[uf.find(a)]
         small = min(len(tokens[a]), len(tokens[b])) < settings.clone_min_tokens
         lang_a = langs[a]
-        comments = compute_comment_and_typo_overlap(submissions[a], submissions[b], lang_a)
+        ca, cb = comments_by_roll[a], comments_by_roll[b]
+        comments = (100.0 * len(ca & cb) / len(ca | cb)) if (ca and cb) else 0.0
         need = settings.clone_exclusive_min_percent * (1.0 if seq >= LOOSE_MATCH_BELOW else LOOSE_EXCLUSIVE_FACTOR)
         # Protect minority-language cohorts: if only 2 students in a mixed-language class used Python, their shingles
         # naturally have df <= 2; require >= 3 submissions in that language for shingle exclusivity alone to mark STRONG.

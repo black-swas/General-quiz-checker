@@ -243,6 +243,9 @@ def test_full_python_evaluation_job_runs_cross_platform(client):
     }
     report = run_job(client, {"25001_que1.py": PY_GOOD, "25002_que1.py": "print(15)\n"}, paper)
     assert report["student_count"] == 2
+    assert "timings" in report
+    assert "plagiarism_seconds" in report["timings"]
+    assert "sandbox_and_static_seconds" in report["timings"]
     by_roll = {e["roll_no"]: e for e in report["evaluations_by_question"]["Q1"]}
     assert by_roll["25001"]["tab_category"] == "GREEN"
     assert by_roll["25002"]["tab_category"] == "RED"

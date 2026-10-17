@@ -14,6 +14,7 @@ Isolation model (no root, no containers needed, so it works inside a Render web 
 Static pre-checks (c_static_analyzer) refuse to run submissions that try obvious escapes.
 """
 import copy
+import functools
 import hashlib
 import math
 import os
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -36,12 +38,19 @@ except ImportError:  # pragma: no cover - only on non-POSIX development machines
 from app.config import settings
 from app.schemas import GccTestResult, TestCase
 
-_VERIFICATION_CACHE: Dict[Tuple[str, str, str, float], GccTestResult] = {}
+_VERIFICATION_CACHE: OrderedDict[Tuple[str, str, str, float, str], GccTestResult] = OrderedDict()
 _CACHE_MAX_ENTRIES = 2048
 
 
 def clear_verification_cache() -> None:
     _VERIFICATION_CACHE.clear()
+
+
+def _cache_put(key: Tuple[str, str, str, float, str], result: GccTestResult, max_entries: int = _CACHE_MAX_ENTRIES) -> None:
+    _VERIFICATION_CACHE[key] = result
+    _VERIFICATION_CACHE.move_to_end(key)
+    if len(_VERIFICATION_CACHE) > max_entries:
+        _VERIFICATION_CACHE.popitem(last=False)
 
 
 def _test_cases_fingerprint(test_cases: List[TestCase]) -> str:
@@ -68,10 +77,7 @@ MAX_STDIN_BYTES = 49152  # stays below the 64 KiB pipe buffer so writing never b
 _PATH_RE = re.compile(r"(?<![\w\"'.])(?:/[\w.\-]+){2,}")
 
 
-def gcc_available() -> bool:
-    return (shutil.which("gcc") or shutil.which("clang")) is not None
-
-
+@functools.lru_cache(maxsize=1)
 def sandbox_runtimes() -> Dict[str, bool]:
     py_found = bool(shutil.which("python3") or shutil.which("python"))
     gcc_found = bool(shutil.which("gcc") or shutil.which("clang") or shutil.which("cl"))
@@ -83,6 +89,16 @@ def sandbox_runtimes() -> Dict[str, bool]:
         "bash": shutil.which("bash") is not None,
         "javascript": shutil.which("node") is not None,
     }
+
+
+def reset_runtime_cache() -> None:
+    sandbox_runtimes.cache_clear()
+
+
+def gcc_available() -> bool:
+    r = sandbox_runtimes()
+    return r.get("c", False) or r.get("cpp", False)
+
 
 
 def runtime_available_for(language: str) -> bool:
@@ -108,10 +124,32 @@ def outputs_match(
     actual: str,
     rel_tol: Optional[float] = None,
     abs_tol: Optional[float] = None,
+    match_mode: str = "exact",
 ) -> bool:
-    """Exact normalized match, plus float tolerance when tokens are numbers (including scientific notation)."""
+    """Exact normalized match, plus float tolerance when tokens are numbers (including scientific notation).
+    Supports match_mode: 'exact' (default), 'sorted_tokens', 'unordered_set', or 'regex'.
+    """
     if expected == actual:
         return True
+
+    mode = (match_mode or "exact").lower()
+    if mode == "regex":
+        try:
+            return bool(re.search(expected.strip(), actual.strip()))
+        except re.error:
+            pass
+    elif mode == "sorted_tokens":
+        if sorted(expected.split()) == sorted(actual.split()):
+            return True
+    elif mode == "unordered_set":
+        exp_lines_set = {line.strip() for line in expected.splitlines() if line.strip()}
+        act_lines_set = {line.strip() for line in actual.splitlines() if line.strip()}
+        if exp_lines_set == act_lines_set and exp_lines_set:
+            return True
+        exp_tok_set = set(expected.split())
+        act_tok_set = set(actual.split())
+        if exp_tok_set == act_tok_set and exp_tok_set:
+            return True
 
     rel_tolerance = float(rel_tol if rel_tol is not None else settings.float_rel_tol)
     abs_tolerance = float(abs_tol if abs_tol is not None else settings.float_abs_tol)
@@ -495,6 +533,7 @@ def run_gcc_verification(
     test_cases: List[TestCase],
     timeout_sec: Optional[float] = None,
     language: str = "c",
+    match_mode: str = "exact",
 ) -> GccTestResult:
     lang = (language or "c").lower()
     timeout_sec = timeout_sec or settings.test_timeout_seconds
@@ -521,10 +560,11 @@ def run_gcc_verification(
         hashlib.sha256(raw_code.encode("utf-8", errors="replace")).hexdigest(),
         _test_cases_fingerprint(test_cases),
         round(float(timeout_sec), 3),
+        match_mode,
     )
-    cached = _VERIFICATION_CACHE.get(cache_key)
-    if cached is not None:
-        return cached.model_copy(deep=True)
+    if cache_key in _VERIFICATION_CACHE:
+        _VERIFICATION_CACHE.move_to_end(cache_key)
+        return _VERIFICATION_CACHE[cache_key].model_copy(deep=True)
 
     ext_map = {"c": ".c", "cpp": ".cpp", "python": ".py", "bash": ".sh", "javascript": ".js"}
     src_ext = ext_map.get(lang, ".c")
@@ -548,7 +588,7 @@ def run_gcc_verification(
                 compiler_errors=f"Compilation timed out (> {settings.compile_timeout_seconds:g}s).",
                 **base,
             )
-            _VERIFICATION_CACHE[cache_key] = res
+            _cache_put(cache_key, res)
             return res.model_copy(deep=True)
         if returncode != 0:
             res = GccTestResult(
@@ -557,7 +597,7 @@ def run_gcc_verification(
                 compiler_errors=sanitize_compiler_errors(stderr, tmpdir)[:1500] or "Compilation or syntax check failed.",
                 **base,
             )
-            _VERIFICATION_CACHE[cache_key] = res
+            _cache_put(cache_key, res)
             return res.model_copy(deep=True)
 
         warnings = sanitize_compiler_errors(stderr, tmpdir)[:600] if stderr else ""
@@ -575,16 +615,35 @@ def run_gcc_verification(
         workers = max(1, min(settings.sandbox_test_workers, len(test_cases)))
         items = list(enumerate(test_cases, start=1))
         if workers == 1:
-            outcomes = [run_case(item) for item in items]
+            outcomes = []
+            consecutive_timeouts = 0
+            for item in items:
+                if settings.early_abort_on_timeout and consecutive_timeouts >= 2:
+                    outcomes.append(("", "", -1, True, False))
+                    continue
+                outcome = run_case(item)
+                outcomes.append(outcome)
+                if outcome[3]:  # timed_out
+                    consecutive_timeouts += 1
+                else:
+                    consecutive_timeouts = 0
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 outcomes = list(pool.map(run_case, items))
 
+        # A4: Single timeout de-flaking rerun for shared/noisy hosts
+        if settings.enable_timeout_rerun and len(test_cases) > 1:
+            to_indices = [i for i, (_, _, _, to, _) in enumerate(outcomes) if to]
+            if len(to_indices) == 1:
+                t_idx = to_indices[0]
+                retry_out = run_case((t_idx + 1, test_cases[t_idx]))
+                if not retry_out[3]:  # cleared timeout on rerun
+                    outcomes[t_idx] = retry_out
+
         for idx, (tc, (out, _err, rc, timed_out, truncated)) in enumerate(zip(test_cases, outcomes), start=1):
-            # Evaluate match on full normalized outputs without pre-truncating to 2048 chars
             actual = normalize_output(out)
             expected = normalize_output(tc.expected_output)
-            ok = (not timed_out) and (not truncated) and rc == 0 and outputs_match(expected, actual)
+            ok = (not timed_out) and (not truncated) and rc == 0 and outputs_match(expected, actual, match_mode=match_mode)
             fmode = diagnose_case_failure(expected, actual, rc, timed_out, truncated)
             if fmode != "PASS" and fmode not in failure_modes:
                 failure_modes.append(fmode)
@@ -628,8 +687,6 @@ def run_gcc_verification(
             case_details=details,
             **base,
         )
-        if len(_VERIFICATION_CACHE) >= _CACHE_MAX_ENTRIES:
-            _VERIFICATION_CACHE.clear()
-        _VERIFICATION_CACHE[cache_key] = res
+        _cache_put(cache_key, res)
         return res.model_copy(deep=True)
 

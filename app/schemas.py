@@ -43,6 +43,10 @@ class QuestionSpec(BaseModel):
     expected_complexity: str = Field(default="O(N)", max_length=80)
     forbidden_constructs: List[str] = Field(default_factory=list, max_length=20)
     required_constructs: List[str] = Field(default_factory=list, max_length=20)
+    match_mode: Literal["exact", "sorted_tokens", "unordered_set", "regex"] = Field(
+        default="exact",
+        description="Output comparison strategy: 'exact' (with float tolerance), 'sorted_tokens', 'unordered_set', or 'regex'",
+    )
     test_cases: List[TestCase] = Field(default_factory=list, max_length=60)
 
 

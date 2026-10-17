@@ -211,3 +211,49 @@ def test_python_syntax_error_fast_precheck():
     assert "SyntaxError" in res.compiler_errors
     assert "submission.py" in res.compiler_errors
 
+
+def test_outputs_match_modes():
+    # Exact mode
+    assert outputs_match("1 2 3", "1 2 3", match_mode="exact")
+    assert not outputs_match("3 2 1", "1 2 3", match_mode="exact")
+
+    # Sorted tokens mode (order-independent lists / tokens)
+    assert outputs_match("3 1 2\n", "1 2 3\n", match_mode="sorted_tokens")
+    assert outputs_match("z b a", "a b z", match_mode="sorted_tokens")
+    assert not outputs_match("1 2 4", "1 2 3", match_mode="sorted_tokens")
+
+    # Unordered set mode (set of unique items)
+    assert outputs_match("apple banana apple", "banana apple", match_mode="unordered_set")
+    assert not outputs_match("apple orange", "apple banana", match_mode="unordered_set")
+
+    # Regex mode (expected is the regex pattern, actual is student output)
+    assert outputs_match(r"Total: \d+ items found", "Total: 42 items found", match_mode="regex")
+    assert not outputs_match(r"Total: \d+ items found", "Error: not found", match_mode="regex")
+
+
+def test_verification_cache_lru_eviction():
+    from app.analyzer.gcc_sandbox import _VERIFICATION_CACHE, _cache_put, clear_verification_cache
+    clear_verification_cache()
+    # Fill cache with 5 dummy entries
+    from app.schemas import GccTestResult
+    dummy_res = GccTestResult(language="python", compiled=True, total_count=0)
+    for i in range(5):
+        _cache_put(f"key_{i}", dummy_res, max_entries=3)
+    # Should only retain last 3 entries: key_2, key_3, key_4
+    assert len(_VERIFICATION_CACHE) == 3
+    assert "key_0" not in _VERIFICATION_CACHE
+    assert "key_1" not in _VERIFICATION_CACHE
+    assert "key_4" in _VERIFICATION_CACHE
+    clear_verification_cache()
+
+
+def test_memoized_runtime_detection():
+    from app.analyzer.gcc_sandbox import reset_runtime_cache, sandbox_runtimes
+    reset_runtime_cache()
+    r1 = sandbox_runtimes()
+    r2 = sandbox_runtimes()
+    assert r1 is r2  # Same cached instance
+    reset_runtime_cache()
+    r3 = sandbox_runtimes()
+    assert r3 == r1
+

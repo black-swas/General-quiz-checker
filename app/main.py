@@ -49,7 +49,7 @@ _NORM_QID_RE = re.compile(r"^(?:q|que|question)[_\-\s]*(\d{1,2})$", re.IGNORECAS
 
 jobs = JobStore(ttl_seconds=settings.job_ttl_seconds, max_jobs=settings.max_stored_jobs)
 rate_limiter = SlidingWindowRateLimiter()
-_job_slot = asyncio.Semaphore(1)        # one evaluation at a time keeps CPU/RAM predictable on a small instance
+_job_slot = asyncio.Semaphore(settings.job_concurrency)
 _background_tasks: Dict[str, asyncio.Task] = {}
 
 

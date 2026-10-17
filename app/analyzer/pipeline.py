@@ -70,9 +70,11 @@ async def run_full_quiz_evaluation(
     if not sandbox_on:
         warnings.append("The execution sandbox is disabled or unavailable, so no tests were run in the sandbox.")
 
-    # ---- pass 1: plagiarism per question in parallel + cross-question corroboration + stylometric consistency
-    clones_by_q: Dict[str, Dict[str, List[CloneMatch]]] = {}
-    previews_by_q: Dict[str, Dict[str, str]] = {}
+    # ---- Overlapped Pass 1 & Pass 2 (S1)
+    # Plagiarism matrix calculation, cross-question collusion, and stylometric consistency
+    # run in parallel background tasks/threads while static analysis and sandbox verification execute immediately.
+    plag_start = time.perf_counter()
+    plagiarism_seconds = 0.0
 
     async def run_one_question_plagiarism(qi: int, q):
         notify("Comparing submissions", 0.02 + 0.08 * (qi + 0.5) / n_q, f"{q.question_id}: pairwise structural comparison")
@@ -83,14 +85,21 @@ async def run_full_quiz_evaluation(
         )
         return q.question_id, clone_map, preview_map
 
-    for qid, clone_map, preview_map in await asyncio.gather(*(run_one_question_plagiarism(qi, q) for qi, q in enumerate(questions))):
-        clones_by_q[qid], previews_by_q[qid] = clone_map, preview_map
+    async def compute_plagiarism_and_stylometry():
+        nonlocal plagiarism_seconds
+        clones_by_q: Dict[str, Dict[str, List[CloneMatch]]] = {}
+        previews_by_q: Dict[str, Dict[str, str]] = {}
+        for qid, clone_map, preview_map in await asyncio.gather(*(run_one_question_plagiarism(qi, q) for qi, q in enumerate(questions))):
+            clones_by_q[qid], previews_by_q[qid] = clone_map, preview_map
+        corroborated = await asyncio.to_thread(apply_collusion_corroboration, clones_by_q, len(rolls))
+        collusion = await asyncio.to_thread(detect_cross_question_collusion, clones_by_q)
+        style_notes, style_warns = await asyncio.to_thread(detect_stylometric_anomalies, students)
+        plagiarism_seconds = round(time.perf_counter() - plag_start, 2)
+        return clones_by_q, previews_by_q, corroborated, collusion, style_notes, style_warns
 
-    corroborated_pairs = apply_collusion_corroboration(clones_by_q, len(rolls))
-    collusion_pairs = detect_cross_question_collusion(clones_by_q)
-    style_notes_by_sub, stylometry_warnings = detect_stylometric_anomalies(students)
+    plag_task = asyncio.create_task(compute_plagiarism_and_stylometry())
 
-    # ---- pass 2: static analysis + polyglot sandbox + triage + 4-way LLM (pipelined)
+    # ---- static analysis + polyglot sandbox + triage + 4-way LLM (pipelined)
     llm_report = new_llm_report()
     semaphore = asyncio.Semaphore(max(1, settings.sandbox_parallelism))
     evaluations: Dict[str, List[SubmissionEvaluation]] = {}
@@ -98,8 +107,10 @@ async def run_full_quiz_evaluation(
 
     total_submissions = sum(len([r for r in rolls if q.question_id in students[r]]) for q in questions)
     finished_submissions = 0
+    sandbox_start = time.perf_counter()
+    llm_seconds = 0.0
 
-    async def evaluate_one(roll: str, meta: Dict[str, str], q) -> SubmissionEvaluation:
+    async def evaluate_one(roll: str, meta: Dict[str, str], q) -> Tuple[str, Dict[str, str], Any, Optional[GccTestResult]]:
         nonlocal finished_submissions
         code = meta["code"]
         file_lang = meta.get("language", "auto")
@@ -135,8 +146,11 @@ async def run_full_quiz_evaluation(
                 and runtime_available_for(static.language)
             )
             if can_run_sandbox:
+                match_mode = getattr(q, "match_mode", "exact")
                 async with semaphore:
-                    gcc = await asyncio.to_thread(run_gcc_verification, runnable_code, q.test_cases, None, static.language)
+                    gcc = await asyncio.to_thread(
+                        run_gcc_verification, runnable_code, q.test_cases, None, static.language, match_mode
+                    )
                 if was_synthesized and gcc and not gcc.compiled:
                     # If auto-synthesized driver signature did not match, fall back cleanly to unverified AI review
                     gcc = GccTestResult(
@@ -146,37 +160,52 @@ async def run_full_quiz_evaluation(
                         total_count=0,
                         skipped_reason="Function-only submission (driver signature could not be auto-synthesized); evaluated by AI review",
                     )
-        ev = deterministic_triage(
-            roll, q, meta["filename"], code, static, gcc,
-            clones_by_q[q.question_id].get(roll, []), previews_by_q[q.question_id].get(roll, ""),
-        )
-        style_note = style_notes_by_sub.get((roll, q.question_id))
-        if style_note:
-            ev.integrity_notes.append(style_note)
         finished_submissions += 1
         notify(
             "Running analysis & tests",
             0.10 + 0.75 * finished_submissions / max(1, total_submissions),
             f"{q.question_id}: evaluated {finished_submissions}/{total_submissions} total submissions",
         )
-        return ev
+        return roll, meta, static, gcc
 
     async def evaluate_question(q) -> Tuple[str, List[SubmissionEvaluation]]:
+        nonlocal llm_seconds
         todo = [(r, students[r][q.question_id]) for r in rolls if q.question_id in students[r]]
+        # 1. Run static analysis & sandbox verification concurrently
+        preliminary = await asyncio.gather(*(evaluate_one(r, m, q) for r, m in todo))
+
+        # 2. Wait for plagiarism & stylometry pass to complete before triage
+        clones_by_q, previews_by_q, _corroborated, _collusion, style_notes_by_sub, _style_warns = await plag_task
+
+        # 3. Deterministic triage
         results: List[SubmissionEvaluation] = []
-        for coro in asyncio.as_completed([evaluate_one(r, m, q) for r, m in todo]):
-            ev_res = await coro
-            results.append(ev_res)
-            languages_counter[ev_res.language] += 1
+        for roll, meta, static, gcc in preliminary:
+            ev = deterministic_triage(
+                roll, q, meta["filename"], meta["code"], static, gcc,
+                clones_by_q[q.question_id].get(roll, []), previews_by_q[q.question_id].get(roll, ""),
+            )
+            style_note = style_notes_by_sub.get((roll, q.question_id))
+            if style_note:
+                ev.integrity_notes.append(style_note)
+            results.append(ev)
+            languages_counter[ev.language] += 1
+
         results.sort(key=lambda e: e.roll_no)
 
+        # 4. LLM review
         if settings.llm_available:
             notify("Reviewing with AI evaluator", 0.88, f"{q.question_id}: reviewing {len(results)} submissions")
+            t_llm = time.perf_counter()
             await annotate_question(q, results, llm_report)
+            llm_seconds += time.perf_counter() - t_llm
         return q.question_id, results
 
     for qid, q_results in await asyncio.gather(*(evaluate_question(q) for q in questions)):
         evaluations[qid] = q_results
+
+    # Retrieve final cross-question collusion and stylometry warnings from plagiarism task
+    _, _, corroborated_pairs, collusion_pairs, _, stylometry_warnings = await plag_task
+    sandbox_seconds = round(time.perf_counter() - sandbox_start, 2)
 
     # ---- assemble matrix & per-question analytics
     matrix: Dict[str, Dict[str, Dict[str, Any]]] = {r: {} for r in rolls}
@@ -215,6 +244,12 @@ async def run_full_quiz_evaluation(
         "quiz_title": quiz_paper.quiz_title,
         "evaluated_at": ist_timestamp(),
         "elapsed_seconds": round(time.time() - started, 1),
+        "timings": {
+            "plagiarism_seconds": plagiarism_seconds,
+            "sandbox_and_static_seconds": sandbox_seconds,
+            "llm_seconds": round(llm_seconds, 2),
+            "total_seconds": round(time.time() - started, 2),
+        },
         "student_count": len(rolls),
         "total_c_files": extracted["total_c_files"],
         "total_files": extracted.get("total_files", extracted["total_c_files"]),

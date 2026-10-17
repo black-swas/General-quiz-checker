@@ -127,6 +127,9 @@ class Settings:
     sqlite_db_path: str = _env_str("SQLITE_DB_PATH", _DEFAULT_DB_PATH)
     job_ttl_seconds: int = _env_int("JOB_TTL_SECONDS", 14400)
     max_stored_jobs: int = _env_int("MAX_STORED_JOBS", _DEFAULT_MAX_JOBS)
+    job_concurrency: int = _env_int("JOB_CONCURRENCY", 1 if _LOW_MEM else 2)
+    early_abort_on_timeout: bool = _env_bool("EARLY_ABORT_ON_TIMEOUT", False)
+    enable_timeout_rerun: bool = _env_bool("ENABLE_TIMEOUT_RERUN", True)
 
     @property
     def auth_required(self) -> bool:

@@ -13,6 +13,7 @@ Design rules
     and automatic follow-up retry if the model omits any submission in a batch.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -435,7 +436,18 @@ async def _post(client: httpx.AsyncClient, payload: Dict[str, Any], headers: Dic
     return None, status
 
 
-async def _review_batch(client, batch, by_roll, system, nonce, headers, report, semaphore, is_retry: bool = False) -> None:
+async def _review_batch(
+    client: httpx.AsyncClient,
+    batch: List[SubmissionEvaluation],
+    by_roll: Dict[str, SubmissionEvaluation],
+    system: str,
+    nonce: str,
+    headers: Dict[str, str],
+    report: Dict[str, Any],
+    semaphore: asyncio.Semaphore,
+    is_retry: bool = False,
+    twins_by_rep: Optional[Dict[str, List[SubmissionEvaluation]]] = None,
+) -> None:
     async with semaphore:
         if report["fatal"]:
             return
@@ -458,7 +470,17 @@ async def _review_batch(client, batch, by_roll, system, nonce, headers, report, 
             data, _status = await _post(client, payload, headers, report)
             if data is not None:
                 reviews = extract_reviews(data)
-                applied = apply_llm_verdicts(by_roll, reviews, str(data.get("model") or model))
+                expanded_reviews: List[Dict[str, Any]] = list(reviews)
+                if twins_by_rep:
+                    twins_by_rep_ci = {k.casefold().strip(): v for k, v in twins_by_rep.items()}
+                    for r in reviews:
+                        rep_roll = str(r.get("roll_no", "")).strip()
+                        twins = twins_by_rep.get(rep_roll) or twins_by_rep_ci.get(rep_roll.casefold()) or []
+                        for twin in twins:
+                            twin_r = dict(r)
+                            twin_r["roll_no"] = twin.roll_no
+                            expanded_reviews.append(twin_r)
+                applied = apply_llm_verdicts(by_roll, expanded_reviews, str(data.get("model") or model))
                 usage = data.get("usage") or {}
                 report["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
                 report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
@@ -473,10 +495,10 @@ async def _review_batch(client, batch, by_roll, system, nonce, headers, report, 
                     if used not in report["models_used"]:
                         report["models_used"].append(used)
                     # If the model omitted some submissions in this batch, retry the missing ones once
-                    if not is_retry and applied < len(batch):
+                    if not is_retry:
                         missing = [e for e in batch if e.llm_model is None and e.cheat_type == "NONE" and e.tab_category != "RED"]
                         if missing:
-                            await _review_batch(client, missing, by_roll, system, nonce, headers, report, semaphore, is_retry=True)
+                            await _review_batch(client, missing, by_roll, system, nonce, headers, report, semaphore, is_retry=True, twins_by_rep=twins_by_rep)
                     return
                 _record_error(report, f"Model {model} returned no usable reviews")
             if report["fatal"]:
@@ -493,13 +515,34 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
         return
     by_roll = {e.roll_no: e for e in eligible}
     nonce = secrets.token_hex(6)
-    system = build_system_prompt(question, build_calibration_block(question), nonce)
+    calibration = await asyncio.to_thread(build_calibration_block, question)
+    system = build_system_prompt(question, calibration, nonce)
     headers = {
         "x-api-key": settings.anthropic_api_key,
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "prompt-caching-2024-07-31",
         "content-type": "application/json",
     }
+
+    # Deduplicate identical submissions before LLM batching with twin fan-out (S4)
+    rep_items: List[SubmissionEvaluation] = []
+    twins_by_rep: Dict[str, List[SubmissionEvaluation]] = {}
+    seen_groups: Dict[Tuple[str, str, str], SubmissionEvaluation] = {}
+
+    for item in eligible:
+        norm_code = item.raw_code.strip()
+        code_hash = hashlib.sha256(norm_code.encode("utf-8")).hexdigest()
+        key = (item.language or "", code_hash, item.tab_category)
+        if key not in seen_groups:
+            seen_groups[key] = item
+            rep_items.append(item)
+            twins_by_rep[item.roll_no] = []
+        else:
+            rep = seen_groups[key]
+            twins_by_rep[rep.roll_no].append(item)
+
+    # Sort eligible representatives by code length descending before bin-packing (S13)
+    rep_items.sort(key=lambda item: len(item.raw_code), reverse=True)
 
     # Dynamic batching: bound both item count and total payload characters for optimal latency & context management
     max_batch_size = max(1, settings.llm_batch_size)
@@ -508,7 +551,7 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
     cur_batch: List[SubmissionEvaluation] = []
     cur_chars = 0
 
-    for item in eligible:
+    for item in rep_items:
         item_chars = len(item.raw_code)
         if cur_batch and (len(cur_batch) >= max_batch_size or (cur_chars + item_chars > max_batch_chars)):
             batches.append(cur_batch)
@@ -523,5 +566,5 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=30.0)
     async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds, limits=limits) as client:
         await asyncio.gather(*(
-            _review_batch(client, b, by_roll, system, nonce, headers, report, semaphore) for b in batches
+            _review_batch(client, b, by_roll, system, nonce, headers, report, semaphore, twins_by_rep=twins_by_rep) for b in batches
         ))
