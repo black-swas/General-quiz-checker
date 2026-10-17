@@ -1,10 +1,13 @@
 """Evaluate one quiz: ingested submissions + question paper -> full polyglot report."""
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 
 from app.analyzer.c_static_analyzer import analyze_c_submission
 from app.analyzer.driver_synthesizer import synthesize_driver

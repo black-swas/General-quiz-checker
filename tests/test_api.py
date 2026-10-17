@@ -232,3 +232,19 @@ def test_single_question_bare_roll_upload_via_api(client):
     status = client.get(f"/api/jobs/{job_id}").json()
     assert status["status"] in ("queued", "running", "done")
 
+
+def test_full_python_evaluation_job_runs_cross_platform(client):
+    paper = {
+        "course_code": "DSE-201", "quiz_title": "Python Quiz", "default_language": "python",
+        "questions": [{"question_id": "Q1", "title": "Sum 1..N", "language": "python",
+                       "problem_statement": "Print 1+..+N", "topic_tags": ["loops"],
+                       "test_cases": [{"input_data": "5\n", "expected_output": "15", "is_sample": True},
+                                      {"input_data": "10\n", "expected_output": "55"}]}],
+    }
+    report = run_job(client, {"25001_que1.py": PY_GOOD, "25002_que1.py": "print(15)\n"}, paper)
+    assert report["student_count"] == 2
+    by_roll = {e["roll_no"]: e for e in report["evaluations_by_question"]["Q1"]}
+    assert by_roll["25001"]["tab_category"] == "GREEN"
+    assert by_roll["25002"]["tab_category"] == "RED"
+
+
