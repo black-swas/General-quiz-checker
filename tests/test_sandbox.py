@@ -188,3 +188,26 @@ def test_function_driver_synthesis_cpp():
     synth, was_synth = synthesize_driver(fn_code, "cpp")
     assert was_synth and "main" in synth
     assert "solve(a, b)" in synth or "solve(" in synth
+
+
+def test_verification_cache_and_clearing():
+    from app.analyzer.gcc_sandbox import _VERIFICATION_CACHE, clear_verification_cache
+    clear_verification_cache()
+    py_code = "print(int(input()) + 1)\n"
+    res1 = run_gcc_verification(py_code, [case("10\n", "11", True)], language="python")
+    assert res1.compiled and res1.passed_count == 1
+    assert len(_VERIFICATION_CACHE) == 1
+    # Second call should hit the cache immediately
+    res2 = run_gcc_verification(py_code, [case("10\n", "11", True)], language="python")
+    assert res2.compiled and res2.passed_count == 1
+    clear_verification_cache()
+    assert len(_VERIFICATION_CACHE) == 0
+
+
+def test_python_syntax_error_fast_precheck():
+    bad_py = "def broken(:\n    pass\n"
+    res = run_gcc_verification(bad_py, [case()], language="python")
+    assert res.compiled is False
+    assert "SyntaxError" in res.compiler_errors
+    assert "submission.py" in res.compiler_errors
+

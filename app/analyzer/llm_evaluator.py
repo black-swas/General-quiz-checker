@@ -444,7 +444,13 @@ async def _review_batch(client, batch, by_roll, system, nonce, headers, report, 
             payload = {
                 "model": model,
                 "max_tokens": min(8000, 320 * len(batch) + 400),
-                "system": system,
+                "system": [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 "messages": [{"role": "user", "content": user_content}],
                 "tools": [TOOL_SCHEMA],
                 "tool_choice": {"type": "tool", "name": TOOL_NAME},
@@ -456,6 +462,10 @@ async def _review_batch(client, batch, by_roll, system, nonce, headers, report, 
                 usage = data.get("usage") or {}
                 report["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
                 report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+                if "cache_read_input_tokens" in usage:
+                    report["cache_read_input_tokens"] = report.get("cache_read_input_tokens", 0) + int(usage["cache_read_input_tokens"] or 0)
+                if "cache_creation_input_tokens" in usage:
+                    report["cache_creation_input_tokens"] = report.get("cache_creation_input_tokens", 0) + int(usage["cache_creation_input_tokens"] or 0)
                 if applied:
                     report["ok_calls"] += 1
                     report["submissions_reviewed"] += applied
@@ -484,7 +494,12 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
     by_roll = {e.roll_no: e for e in eligible}
     nonce = secrets.token_hex(6)
     system = build_system_prompt(question, build_calibration_block(question), nonce)
-    headers = {"x-api-key": settings.anthropic_api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    headers = {
+        "x-api-key": settings.anthropic_api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
+        "content-type": "application/json",
+    }
 
     # Dynamic batching: bound both item count and total payload characters for optimal latency & context management
     max_batch_size = max(1, settings.llm_batch_size)

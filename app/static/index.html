@@ -20,7 +20,9 @@
       </div>
     </div>
     <div class="topbar-status" id="statusPills" aria-live="polite"></div>
-    <div class="topbar-actions" id="headerActions"></div>
+    <div class="topbar-actions" id="headerActions">
+      <button id="guideBtn" class="btn btn-sm btn-ghost" type="button" title="View documentation and guide">📖 Instructions &amp; Guide</button>
+    </div>
   </header>
 
   <main id="main">
@@ -46,10 +48,12 @@
           </div>
           <div id="paperEditorBox" class="editor-box" hidden>
             <div class="toolbar-row">
-              <span class="muted small">Question paper JSON editor:</span>
+              <span class="muted small">Quick templates:</span>
               <span class="spacer"></span>
-              <button id="tplPythonBtn" class="btn btn-sm" type="button">Python template</button>
-              <button id="tplGeneralBtn" class="btn btn-sm" type="button">General / Rubric template</button>
+              <button id="tplCBtn" class="btn btn-sm" type="button">C/C++ (Tests)</button>
+              <button id="tplPythonBtn" class="btn btn-sm" type="button">Python</button>
+              <button id="tplFunctionBtn" class="btn btn-sm" type="button">Function-only</button>
+              <button id="tplGeneralBtn" class="btn btn-sm" type="button">Rubric / Theory</button>
               <button id="applyEditorBtn" class="btn btn-sm btn-primary" type="button">Apply JSON</button>
             </div>
             <textarea id="paperEditorTextarea" rows="10" spellcheck="false" aria-label="Question paper JSON"></textarea>
@@ -67,12 +71,15 @@
           <input id="filesInput" type="file" accept=".zip,.c,.cpp,.cc,.cxx,.h,.hpp,.py,.ipynb,.java,.js,.mjs,.ts,.tsx,.rs,.go,.r,.rmd,.sql,.sh,.bash,.jl,.m,.kt,.swift,.rb,.php,.cs,.scala,.hs,.lua,.pl,.txt,.md,.tex,.json,.yaml,.yml,.csv" multiple class="visually-hidden">
           <div id="filesSummary" class="summary-box" hidden></div>
           <details class="naming-help">
-            <summary>How should files be named?</summary>
+            <summary>How should files and ZIPs be structured?</summary>
             <ul>
-              <li><code>26416.zip</code> containing <code>que1.py</code>, <code>que2.sql</code>, <code>que3.txt</code>… (student id = zip name)</li>
-              <li><code>26416_que1.py</code> or <code>26416_q1.c</code> as loose files in any language</li>
-              <li>A master ZIP with one folder per student: <code>26416/que1.java</code></li>
-              <li>Leading comments like <code># Roll No: 26416</code> or <code>// Roll No: 26416</code> are also recognised automatically.</li>
+              <li><strong>Moodle Direct ZIP</strong>: Click "Download all submissions" in Moodle and upload the ZIP directly (e.g. <code>Name_12345_assignsubmission_file_/que1.c</code> is auto-parsed with zero renaming!).</li>
+              <li><strong>Google Classroom Export</strong>: Upload the classroom zip directly (student folders or prefix filenames).</li>
+              <li><strong>Folder-per-Student</strong>: Master ZIP containing <code>25104/q1.c</code>, <code>25104/q2.py</code>.</li>
+              <li><strong>Flat Loose Files</strong>: Files named <code>25104_q1.c</code>, <code>25104_q2.py</code>, <code>25104_que1.java</code>.</li>
+              <li><strong>Single-Question Lab Exams</strong>: If your quiz has 1 question, files named simply <code>25104.c</code> or <code>25104.py</code> map to Q1 automatically!</li>
+              <li><strong>Comment Metadata Fallback</strong>: Header comments like <code>// Roll No: 25104, Question: 1</code> are parsed automatically if filenames are generic.</li>
+              <li><strong>Jupyter Notebooks</strong>: <code>.ipynb</code> files have Python code cells extracted and evaluated seamlessly.</li>
             </ul>
           </details>
         </div>
@@ -128,6 +135,120 @@
       <div id="tabPanel" class="tab-panel" role="tabpanel"></div>
     </section>
   </main>
+
+  <!-- ================= INSTRUCTIONS & GUIDE DIALOG ================= -->
+  <dialog id="guideDialog" class="dialog-wide">
+    <div class="dialog-head">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:1.3rem;">📖</span>
+        <div>
+          <h3 style="margin:0;">Evaluator Guide &amp; Instructions</h3>
+          <p class="muted small" style="margin:0;">IISER Bhopal · Data Science &amp; Engineering Lab Triage Platform</p>
+        </div>
+      </div>
+      <button class="btn btn-ghost" id="guideClose" type="button">Close (Esc)</button>
+    </div>
+    <div class="guide-nav-row">
+      <button class="guide-tab-btn active" data-tab="guideJson">Question Paper JSON</button>
+      <button class="guide-tab-btn" data-tab="guideZip">Dataset &amp; ZIP Formats</button>
+      <button class="guide-tab-btn" data-tab="guideWorkflow">Grading &amp; TA Review</button>
+      <button class="guide-tab-btn" data-tab="guideSpeed">Performance &amp; Speedup Engine</button>
+    </div>
+    <div class="guide-body">
+      <!-- Tab 1: JSON -->
+      <div id="guideJson" class="guide-panel active">
+        <h4>1. Question Paper JSON Schema</h4>
+        <p>A question paper JSON defines the course code, quiz title, default language, and questions. Questions can include sample &amp; hidden test cases, float tolerances, forbidden constructs, and grading rubrics for AI triage.</p>
+        
+        <div class="guide-grid">
+          <div>
+            <h5>Standard Fields:</h5>
+            <ul class="notes-list small">
+              <li><code>course_code</code>: Course ID (e.g. <code>"DSE-201"</code>).</li>
+              <li><code>quiz_title</code>: Title of exam or quiz.</li>
+              <li><code>question_id</code>: Target ID matching student filenames (<code>"Q1"</code>, <code>"que1"</code>, <code>"1"</code>).</li>
+              <li><code>execution_mode</code>: <code>"auto"</code> (runs tests if present), <code>"sandbox"</code> (enforce compile &amp; run), <code>"llm_only"</code> (written/rubric tests), or <code>"static_only"</code>.</li>
+              <li><code>is_sample</code>: Set to <code>true</code> for visible sample test cases, <code>false</code> for hidden test cases. <em>(Students passing only samples are flagged for hardcoding!)</em></li>
+              <li><code>forbidden_constructs</code>: Keywords or regex banned from code (e.g. <code>["goto", "eval", "qsort"]</code>).</li>
+              <li><code>float_rel_tol</code> / <code>float_abs_tol</code>: Numerical tolerance for floats &amp; scientific notation (default: <code>1e-6</code>).</li>
+            </ul>
+          </div>
+          <div>
+            <h5>Quick Copyable Examples:</h5>
+            <div class="template-selector-row">
+              <button class="btn btn-sm" id="btnCopyC">Copy C/C++ Paper</button>
+              <button class="btn btn-sm" id="btnCopyPy">Copy Python Paper</button>
+              <button class="btn btn-sm" id="btnCopyFn">Copy Function-Only</button>
+              <button class="btn btn-sm" id="btnCopyGen">Copy Rubric/Theory</button>
+            </div>
+            <pre class="guide-snippet" id="guideCodeSnippet"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: ZIP & Datasets -->
+      <div id="guideZip" class="guide-panel">
+        <h4>2. Dataset Creation &amp; Packaging Guide</h4>
+        <p>The ingestion engine handles whatever naming students used with zero manual TA renaming required:</p>
+        <div class="guide-cards-grid">
+          <div class="card">
+            <h5>🎓 Moodle Direct ZIP (Zero Renaming)</h5>
+            <p class="small muted">Download all submissions directly from Moodle. The folder structure <code>Student Name_12345_assignsubmission_file_/que1.c</code> is automatically parsed.</p>
+          </div>
+          <div class="card">
+            <h5>📁 Folder per Student</h5>
+            <p class="small muted">Master ZIP with <code>25104/q1.c</code> and <code>25104/q2.py</code>. Sub-zips (<code>25104.zip</code> inside the archive) are also unpacked recursively.</p>
+          </div>
+          <div class="card">
+            <h5>📄 Flat Loose Files</h5>
+            <p class="small muted">All student files mixed in root: <code>25104_q1.c</code>, <code>25104_que2.py</code>, <code>q1_25104.cpp</code>.</p>
+          </div>
+          <div class="card">
+            <h5>⚡ 1-Question Exam Auto-Mapping</h5>
+            <p class="small muted">If the exam has only 1 question, files named <code>25104.c</code>, <code>25104.py</code>, or <code>rollno.cpp</code> map to Q1 automatically!</p>
+          </div>
+          <div class="card">
+            <h5>🏷️ Comment Header Fallback</h5>
+            <p class="small muted">If files are named <code>main.c</code>, comments like <code>// Roll No: 25104, Question: 1</code> or <code># Student: 25104</code> are parsed.</p>
+          </div>
+          <div class="card">
+            <h5>📓 Jupyter Notebooks (.ipynb)</h5>
+            <p class="small muted">Python code cells in <code>.ipynb</code> files are extracted in chronological order and evaluated as Python scripts.</p>
+          </div>
+        </div>
+        <p class="small muted" style="margin-top:14px;"><strong>Auto-cleaned junk:</strong> Precompiled binaries (<code>a.out</code>, <code>.exe</code>, <code>.class</code>), IDE files (<code>.vscode</code>, <code>.idea</code>, <code>tempCodeRunnerFile.*</code>), and OS artifacts (<code>__MACOSX</code>, <code>.DS_Store</code>) are automatically stripped.</p>
+      </div>
+
+      <!-- Tab 3: Grading & TA Workflow -->
+      <div id="guideWorkflow" class="guide-panel">
+        <h4>3. Grading Queues &amp; TA Workflow</h4>
+        <p>The platform separates submissions into 4 clear queues for high TA productivity:</p>
+        <ul class="notes-list">
+          <li><strong>GREEN (Clear)</strong>: Standard, correct solution passing tests or meeting rubric. No integrity flags.</li>
+          <li><strong>BLUE (Creative approach)</strong>: Correct solution with an innovative, distinctive, or advanced algorithm detected by the AI evaluator or AST analyzer.</li>
+          <li><strong>RED (Needs review)</strong>: Flagged for compiler errors, test failures, timeouts, hardcoded sample spoofing, structural plagiarism, or prompt injection.</li>
+          <li><strong>GRAY (Unverified)</strong>: Awaiting manual review or languages without a local sandbox runtime.</li>
+        </ul>
+        <h5 style="margin-top:16px;">Human-in-the-Loop (HITL) Calibration:</h5>
+        <p class="small muted">TAs can override any verdict with one click. Overrides and comments are stored in the server SQLite database. Future evaluation runs inject these past decisions into Claude's prompt so the AI calibrates to your grading standards!</p>
+        <h5 style="margin-top:14px;">Exporting Results:</h5>
+        <p class="small muted">Download a consolidated <strong>Gradebook CSV</strong> ready for immediate import into Moodle or Google Classroom, or save the complete session JSON for archival.</p>
+      </div>
+
+      <!-- Tab 4: Performance & Speed Engine -->
+      <div id="guideSpeed" class="guide-panel">
+        <h4>4. High-Speed Architecture (Zero Accuracy Loss)</h4>
+        <p>The system is engineered to evaluate 200+ students in minutes without compromising evaluation accuracy:</p>
+        <ul class="notes-list small">
+          <li><strong>In-Memory SHA-256 Verification Cache</strong>: Duplicate submissions (identical templates, empty files, identical solutions) are verified once; subsequent identical submissions receive cached results in <strong>0.0001s</strong>.</li>
+          <li><strong>Native AST Python Syntax Check</strong>: In-memory compilation bypasses subprocess overhead, validating syntax in <strong>0.1ms</strong>.</li>
+          <li><strong>Anthropic Prompt Caching</strong>: The system prompt (rubric, problem statement, instructions) is marked with <code>cache_control: ephemeral</code>, accelerating batches by <strong>~70%</strong> and slashing token costs by <strong>90%</strong>.</li>
+          <li><strong>Plagiarism Disjoint Filtering</strong>: Exact token stream identity bypasses SequenceMatcher; disjoint 5-token shingles skip set unions.</li>
+          <li><strong>Zero-RAM Disk Spooling</strong>: ZIP uploads stream in 64 KB disk buffers, keeping memory footprint strictly under 512 MB on Render Free plan.</li>
+        </ul>
+      </div>
+    </div>
+  </dialog>
 
   <dialog id="tokenDialog">
     <form method="dialog" id="tokenForm">

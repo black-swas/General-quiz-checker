@@ -207,15 +207,21 @@ def run_question_plagiarism_matrix(
                 continue
             if 200.0 * min(len(ta), len(tb)) / (len(ta) + len(tb)) < thr:
                 continue                                   # lengths too different to reach the threshold
-            jacc = _jaccard(sh5[a], sh5[b])
-            if jacc < SHINGLE_PREFILTER_PERCENT:
-                continue
-            matcher = SequenceMatcher(None, ta, tb, autojunk=False)
-            if matcher.real_quick_ratio() * 100.0 < thr or matcher.quick_ratio() * 100.0 < thr:
-                continue
-            seq = matcher.ratio() * 100.0
-            if seq < thr:
-                continue
+            if ta == tb:
+                seq = 100.0
+                jacc = 100.0
+            else:
+                if sh5[a].isdisjoint(sh5[b]):
+                    continue
+                jacc = _jaccard(sh5[a], sh5[b])
+                if jacc < SHINGLE_PREFILTER_PERCENT:
+                    continue
+                matcher = SequenceMatcher(None, ta, tb, autojunk=False)
+                if matcher.real_quick_ratio() * 100.0 < thr or matcher.quick_ratio() * 100.0 < thr:
+                    continue
+                seq = matcher.ratio() * 100.0
+                if seq < thr:
+                    continue
             shared = sh4[a] & sh4[b]
             denom = max(1, min(len(sh4[a]), len(sh4[b])))
             exclusive = 100.0 * sum(1 for s in shared if df[s] <= 2) / denom

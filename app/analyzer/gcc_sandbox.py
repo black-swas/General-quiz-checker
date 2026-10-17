@@ -13,6 +13,8 @@ Isolation model (no root, no containers needed, so it works inside a Render web 
     program cannot read the server's environment through /proc/<ppid>/environ
 Static pre-checks (c_static_analyzer) refuse to run submissions that try obvious escapes.
 """
+import copy
+import hashlib
 import math
 import os
 import re
@@ -33,6 +35,24 @@ except ImportError:  # pragma: no cover - only on non-POSIX development machines
 
 from app.config import settings
 from app.schemas import GccTestResult, TestCase
+
+_VERIFICATION_CACHE: Dict[Tuple[str, str, str, float], GccTestResult] = {}
+_CACHE_MAX_ENTRIES = 2048
+
+
+def clear_verification_cache() -> None:
+    _VERIFICATION_CACHE.clear()
+
+
+def _test_cases_fingerprint(test_cases: List[TestCase]) -> str:
+    h = hashlib.sha256()
+    for tc in test_cases:
+        h.update(tc.input_data.encode("utf-8", errors="replace"))
+        h.update(b"-->")
+        h.update(tc.expected_output.encode("utf-8", errors="replace"))
+        h.update(b"|sample=" if tc.is_sample else b"|hidden=")
+    return h.hexdigest()
+
 
 if os.name == "nt":
     SAFE_ENV = {
@@ -284,9 +304,18 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
         label = "g++"
     elif lang == "python":
         py = sys.executable or shutil.which("python3") or shutil.which("python") or "python3"
-        cmd = [py, "-I", "-B", "-m", "py_compile", src_path]
         run_argv = [py, "-I", "-B", src_path]
         label = "python3"
+        try:
+            with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+                py_source = fh.read()
+            compile(py_source, "submission.py", "exec")
+            return 0, "", False, run_argv, label
+        except SyntaxError as exc:
+            line_no = exc.lineno or 1
+            code_line = (exc.text or "").strip()
+            msg = f'File "submission.py", line {line_no}\n    {code_line}\nSyntaxError: {exc.msg}'
+            return 1, msg, False, run_argv, label
     elif lang == "bash":
         sh = shutil.which("bash") or "bash"
         cmd = [sh, "-n", src_path]
@@ -381,7 +410,7 @@ def execute_binary_capped(
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             try:
-                out_b, err_b = proc.communicate(timeout=0.5)
+                out_b, err_b = proc.communicate(timeout=0.05)
             except Exception:
                 pass
             timed_out = True
@@ -446,7 +475,7 @@ def execute_binary_capped(
         _kill_group(proc)
         sel.close()
         try:
-            proc.wait(timeout=1.0)
+            proc.wait(timeout=0.1)
         except subprocess.TimeoutExpired:
             pass
         for stream in (proc.stdout, proc.stderr):
@@ -487,6 +516,16 @@ def run_gcc_verification(
             skipped_reason=f"No local {lang} sandbox runtime; evaluated via static analysis and AI review",
         )
 
+    cache_key = (
+        lang,
+        hashlib.sha256(raw_code.encode("utf-8", errors="replace")).hexdigest(),
+        _test_cases_fingerprint(test_cases),
+        round(float(timeout_sec), 3),
+    )
+    cached = _VERIFICATION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.model_copy(deep=True)
+
     ext_map = {"c": ".c", "cpp": ".cpp", "python": ".py", "bash": ".sh", "javascript": ".js"}
     src_ext = ext_map.get(lang, ".c")
     bin_ext = ".exe" if os.name == "nt" and lang in ("c", "cpp") else ".out"
@@ -503,19 +542,23 @@ def run_gcc_verification(
             return GccTestResult(compiled=False, runtime_used=lang, compiler_errors=f"Compiler invocation error: {exc}", **base)
 
         if compile_timed_out:
-            return GccTestResult(
+            res = GccTestResult(
                 compiled=False,
                 runtime_used=runtime_label,
                 compiler_errors=f"Compilation timed out (> {settings.compile_timeout_seconds:g}s).",
                 **base,
             )
+            _VERIFICATION_CACHE[cache_key] = res
+            return res.model_copy(deep=True)
         if returncode != 0:
-            return GccTestResult(
+            res = GccTestResult(
                 compiled=False,
                 runtime_used=runtime_label,
                 compiler_errors=sanitize_compiler_errors(stderr, tmpdir)[:1500] or "Compilation or syntax check failed.",
                 **base,
             )
+            _VERIFICATION_CACHE[cache_key] = res
+            return res.model_copy(deep=True)
 
         warnings = sanitize_compiler_errors(stderr, tmpdir)[:600] if stderr else ""
         passed = sample_passed = hidden_passed = 0
@@ -572,7 +615,7 @@ def run_gcc_verification(
                 "returncode": rc,
             })
 
-        return GccTestResult(
+        res = GccTestResult(
             compiled=True,
             runtime_used=runtime_label,
             compiler_warnings=warnings,
@@ -585,4 +628,8 @@ def run_gcc_verification(
             case_details=details,
             **base,
         )
+        if len(_VERIFICATION_CACHE) >= _CACHE_MAX_ENTRIES:
+            _VERIFICATION_CACHE.clear()
+        _VERIFICATION_CACHE[cache_key] = res
+        return res.model_copy(deep=True)
 

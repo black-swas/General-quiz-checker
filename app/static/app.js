@@ -69,6 +69,51 @@
 
   const VALID_FILE_RE = /\.(zip|c|cpp|cc|cxx|c\+\+|h|hpp|hxx|ino|py|pyw|ipynb|java|js|mjs|cjs|jsx|ts|tsx|rs|go|r|rmd|sql|sh|bash|zsh|jl|m|kt|kts|swift|rb|php|cs|scala|hs|lua|pl|pm|dart|zig|pas|f90|f95|for|cob|v|sv|vhd|vhdl|asm|s|clj|ex|exs|erl|ml|fs|sol|tex|md|markdown|rst|txt|text|ans|pseudo|csv|tsv|json|yaml|yml|xml|html|css)$/i;
 
+  const C_CPP_TEMPLATE = {
+    course_code: 'DSE-101',
+    quiz_title: 'C/C++ Lab Examination',
+    default_language: 'c',
+    questions: [
+      {
+        question_id: 'Q1',
+        title: 'Reverse Array In-Place',
+        language: 'c',
+        execution_mode: 'sandbox',
+        problem_statement: 'Read an integer N followed by N integers. Reverse the array in-place and print elements separated by spaces.',
+        topic_tags: ['arrays', 'pointers', 'loops'],
+        expected_complexity: 'O(N)',
+        forbidden_constructs: ['qsort', 'goto'],
+        test_cases: [
+          { input_data: '5\n1 2 3 4 5\n', expected_output: '5 4 3 2 1', is_sample: true },
+          { input_data: '1\n42\n', expected_output: '42', is_sample: true },
+          { input_data: '6\n10 20 30 40 50 60\n', expected_output: '60 50 40 30 20 10', is_sample: false },
+        ],
+      },
+    ],
+  };
+
+  const FUNCTION_TEMPLATE = {
+    course_code: 'CS-202',
+    quiz_title: 'Function-Only Algorithm Assessment',
+    default_language: 'python',
+    questions: [
+      {
+        question_id: 'Q1',
+        title: 'Two Sum Target Function',
+        language: 'python',
+        execution_mode: 'auto',
+        problem_statement: 'Write a function two_sum(nums, target) that returns space-separated indices of two numbers that sum up to target.',
+        topic_tags: ['hashmap', 'arrays'],
+        expected_complexity: 'O(N)',
+        test_cases: [
+          { input_data: '[2, 7, 11, 15]\n9\n', expected_output: '0 1', is_sample: true },
+          { input_data: '[3, 2, 4]\n6\n', expected_output: '1 2', is_sample: true },
+          { input_data: '[3, 3]\n6\n', expected_output: '0 1', is_sample: false },
+        ],
+      },
+    ],
+  };
+
   const PYTHON_TEMPLATE = {
     course_code: 'DSE-201',
     quiz_title: 'Python & Algorithms Quiz',
@@ -1045,9 +1090,19 @@
         }
       });
     }
+    if ($('tplCBtn')) {
+      $('tplCBtn').addEventListener('click', () => {
+        $('paperEditorTextarea').value = JSON.stringify(C_CPP_TEMPLATE, null, 2);
+      });
+    }
     if ($('tplPythonBtn')) {
       $('tplPythonBtn').addEventListener('click', () => {
         $('paperEditorTextarea').value = JSON.stringify(PYTHON_TEMPLATE, null, 2);
+      });
+    }
+    if ($('tplFunctionBtn')) {
+      $('tplFunctionBtn').addEventListener('click', () => {
+        $('paperEditorTextarea').value = JSON.stringify(FUNCTION_TEMPLATE, null, 2);
       });
     }
     if ($('tplGeneralBtn')) {
@@ -1059,6 +1114,37 @@
       $('applyEditorBtn').addEventListener('click', () => {
         loadPaper($('paperEditorTextarea').value, 'Inline JSON Editor');
       });
+    }
+    if ($('guideBtn') && $('guideDialog')) {
+      const gDialog = $('guideDialog');
+      const snippetBox = $('guideCodeSnippet');
+      if (snippetBox) snippetBox.textContent = JSON.stringify(C_CPP_TEMPLATE, null, 2);
+
+      $('guideBtn').addEventListener('click', () => gDialog.showModal());
+      if ($('guideClose')) $('guideClose').addEventListener('click', () => gDialog.close());
+
+      document.querySelectorAll('.guide-tab-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.guide-tab-btn').forEach((b) => b.classList.remove('active'));
+          document.querySelectorAll('.guide-panel').forEach((p) => p.classList.remove('active'));
+          btn.classList.add('active');
+          const panel = $(btn.getAttribute('data-tab'));
+          if (panel) panel.classList.add('active');
+        });
+      });
+
+      const copySnippet = (obj, name) => {
+        const text = JSON.stringify(obj, null, 2);
+        if (snippetBox) snippetBox.textContent = text;
+        navigator.clipboard.writeText(text).then(
+          () => toast(`Copied ${name} to clipboard!`),
+          () => toast(`Displayed ${name}`)
+        );
+      };
+      if ($('btnCopyC')) $('btnCopyC').addEventListener('click', () => copySnippet(C_CPP_TEMPLATE, 'C/C++ Template'));
+      if ($('btnCopyPy')) $('btnCopyPy').addEventListener('click', () => copySnippet(PYTHON_TEMPLATE, 'Python Template'));
+      if ($('btnCopyFn')) $('btnCopyFn').addEventListener('click', () => copySnippet(FUNCTION_TEMPLATE, 'Function-Only Template'));
+      if ($('btnCopyGen')) $('btnCopyGen').addEventListener('click', () => copySnippet(GENERAL_TEMPLATE, 'Theory/Rubric Template'));
     }
     if ($('cancelJobBtn')) {
       $('cancelJobBtn').addEventListener('click', cancelActiveJob);
