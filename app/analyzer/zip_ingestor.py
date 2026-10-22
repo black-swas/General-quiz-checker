@@ -42,7 +42,7 @@ IGNORED_DIR_SEGMENTS = {
 }
 IGNORED_BASENAMES = {"thumbs.db", "desktop.ini", "a.out", "__init__.py", "package-lock.json", "yarn.lock", "cargo.lock"}
 IGNORED_EXTENSIONS = {
-    ".out", ".exe", ".o", ".obj", ".dll", ".so", ".dylib", ".png", ".jpg", ".jpeg", ".pdf", ".ds_store", ".git",
+    ".out", ".exe", ".o", ".obj", ".dll", ".so", ".dylib", ".ds_store", ".git",
     ".gif", ".bmp", ".class", ".pyc", ".pyo", ".pyd", ".a", ".lib", ".bin", ".wasm", ".jar", ".war", ".swp", ".swo",
 }
 OFFICE_OR_BINARY_DOCS = {".doc", ".docx", ".rtf", ".odt", ".xls", ".xlsx", ".ppt", ".pptx"}
@@ -125,6 +125,10 @@ EXT_TO_LANGUAGE: Dict[str, str] = {
     ".xml": "xml",
     ".html": "html",
     ".css": "css",
+    ".pdf": "pdf",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
 }
 
 SUPPORTED_EXTENSIONS: Set[str] = set(EXT_TO_LANGUAGE.keys())
@@ -491,6 +495,32 @@ def _decode_source(raw: bytes, ext: str = "") -> str:
             except UnicodeDecodeError:
                 text = raw.decode("latin-1", errors="replace")
     text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+
+    if ext == ".pdf":
+        try:
+            import pypdfium2 as pdfium
+            doc = pdfium.PdfDocument(raw)
+            page_texts = []
+            for page in doc:
+                tp = page.get_textpage()
+                page_texts.append(tp.get_text_range())
+            extracted_txt = "\n\n--- Page Break ---\n\n".join(page_texts).strip()
+            if extracted_txt:
+                return extracted_txt
+            return f"[Digitized Scanned PDF Document: {len(doc)} pages]"
+        except Exception:
+            return "[Digitized PDF Document]"
+
+    if ext in (".png", ".jpg", ".jpeg", ".webp"):
+        return f"[Student Answer Sheet Image: {len(raw)} bytes]"
+
+    if ext != ".ipynb" and len(raw) > 32:
+        null_count = raw.count(b"\x00")
+        sample = text[:4000]
+        if sample:
+            non_printable = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\t\n\r")
+            if (non_printable / len(sample) > 0.10) or (null_count > len(raw) * 0.05 and not raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE))):
+                return ""  # Reject binary files masquerading as source code
 
 
     if ext == ".ipynb":

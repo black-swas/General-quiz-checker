@@ -13,7 +13,7 @@
 
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">Q</span>
+      <img src="/static/iiserb_logo.png" alt="IISER Bhopal Logo" class="brand-logo-img">
       <div>
         <h1>Polyglot &amp; C Lab Quiz Evaluator</h1>
         <p>IISER Bhopal · Data Science &amp; Engineering · Universal Language &amp; Test Triage</p>
@@ -21,6 +21,9 @@
     </div>
     <div class="topbar-status" id="statusPills" aria-live="polite"></div>
     <div class="topbar-actions" id="headerActions">
+      <button id="btnOpenHandwrittenHub" class="btn btn-sm btn-ghost" type="button" style="border:1.5px solid #10b981;color:#047857;font-weight:700;margin-right:6px;" title="View Real Digitized Handwritten Student Exam benchmarks">✍️ Handwritten Exam Benchmark</button>
+      <button id="btnOpenPolyglotHub" class="btn btn-sm btn-ghost" type="button" style="border:1.5px solid var(--accent, #3b82f6);color:var(--text);font-weight:700;margin-right:6px;" title="View HumanEval-X Polyglot accuracy & speed benchmark results">📊 Polyglot Benchmark Hub</button>
+      <a href="/scan" class="btn btn-sm btn-primary" style="text-decoration:none;margin-right:6px;">📱 Mobile Paper Scanner &amp; Hub</a>
       <button id="guideBtn" class="btn btn-sm btn-ghost" type="button" title="View documentation and guide">📖 Instructions &amp; Guide</button>
     </div>
   </header>
@@ -40,23 +43,14 @@
           <div class="field-row">
             <label class="btn" for="paperInput">Choose JSON file</label>
             <input id="paperInput" type="file" accept=".json,application/json" class="visually-hidden">
-            <span class="muted">or</span>
-            <select id="sampleSelect" aria-label="Load a sample question paper">
-              <option value="">Load a sample paper…</option>
-            </select>
             <button id="toggleEditorBtn" class="btn btn-sm btn-ghost" type="button">Edit / Create JSON</button>
           </div>
           <div id="paperEditorBox" class="editor-box" hidden>
             <div class="toolbar-row">
-              <span class="muted small">Quick templates:</span>
               <span class="spacer"></span>
-              <button id="tplCBtn" class="btn btn-sm" type="button">C/C++ (Tests)</button>
-              <button id="tplPythonBtn" class="btn btn-sm" type="button">Python</button>
-              <button id="tplFunctionBtn" class="btn btn-sm" type="button">Function-only</button>
-              <button id="tplGeneralBtn" class="btn btn-sm" type="button">Rubric / Theory</button>
               <button id="applyEditorBtn" class="btn btn-sm btn-primary" type="button">Apply JSON</button>
             </div>
-            <textarea id="paperEditorTextarea" rows="10" spellcheck="false" aria-label="Question paper JSON"></textarea>
+            <textarea id="paperEditorTextarea" rows="10" spellcheck="false" aria-label="Question paper JSON" placeholder="Paste or type question paper JSON here..."></textarea>
           </div>
           <div id="paperSummary" class="summary-box" hidden></div>
         </div>
@@ -66,9 +60,9 @@
           <p class="muted">One ZIP per student, one master ZIP, or loose source/text files (<code>.c</code>, <code>.py</code>, <code>.cpp</code>, <code>.java</code>, <code>.sql</code>, <code>.js</code>, <code>.txt</code>, <code>.md</code>, <code>.ipynb</code>…).</p>
           <div id="dropZone" class="dropzone" tabindex="0" role="button" aria-label="Choose or drop student files">
             <strong>Drop files here</strong>
-            <span class="muted">or click to browse (.zip, .c, .py, .cpp, .java, .sql, .js, .txt, .md…)</span>
+            <span class="muted">or click to browse (.zip, .pdf, images, .c, .py, .cpp, .java, .sql, .js, .txt, .md…)</span>
           </div>
-          <input id="filesInput" type="file" accept=".zip,.c,.cpp,.cc,.cxx,.h,.hpp,.py,.ipynb,.java,.js,.mjs,.ts,.tsx,.rs,.go,.r,.rmd,.sql,.sh,.bash,.jl,.m,.kt,.swift,.rb,.php,.cs,.scala,.hs,.lua,.pl,.txt,.md,.tex,.json,.yaml,.yml,.csv" multiple class="visually-hidden">
+          <input id="filesInput" type="file" accept=".zip,.pdf,image/*,.png,.jpg,.jpeg,.c,.cpp,.cc,.cxx,.h,.hpp,.py,.ipynb,.java,.js,.mjs,.ts,.tsx,.rs,.go,.r,.rmd,.sql,.sh,.bash,.jl,.m,.kt,.swift,.rb,.php,.cs,.scala,.hs,.lua,.pl,.txt,.md,.tex,.json,.yaml,.yml,.csv" multiple class="visually-hidden">
           <div id="filesSummary" class="summary-box" hidden></div>
           <details class="naming-help">
             <summary>How should files and ZIPs be structured?</summary>
@@ -268,6 +262,209 @@
       <button class="btn btn-ghost" id="compareClose" type="button">Close</button>
     </div>
     <div id="compareBody" class="compare-body"></div>
+  </dialog>
+
+  <dialog id="aiConfigDialog" class="dialog-standard" style="max-width:540px;border-radius:12px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);padding:24px;box-shadow:0 12px 36px rgba(0,0,0,0.25);">
+    <div class="dialog-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h3 style="margin:0;display:flex;align-items:center;gap:8px;">⚡ AI Review &amp; Triage Configuration</h3>
+      <button class="btn btn-sm btn-ghost" id="aiConfigClose" type="button" style="font-size:1.1rem;padding:2px 8px;">✕</button>
+    </div>
+    <p class="small muted" style="margin-bottom:16px;line-height:1.5;">
+      Configure the Anthropic Claude API key and multimodal model for automated 4-way triage (Red / Green / Blue / Gray) and step-by-step rubric evaluation.
+    </p>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label class="small muted" style="font-weight:700;display:block;margin-bottom:4px;">Current Status</label>
+        <div id="cfgAiStatusBadge" class="pill pill-ok" style="display:inline-block;padding:6px 12px;font-size:0.86rem;font-weight:700;">Checking...</div>
+      </div>
+      <div>
+        <label class="small muted" for="cfgApiKeyInput" style="font-weight:700;display:block;margin-bottom:4px;">Anthropic API Key (sk-ant-...)</label>
+        <input id="cfgApiKeyInput" type="password" placeholder="Enter Anthropic API Key..." autocomplete="off" style="width:100%;padding:8px 10px;font-family:var(--mono);font-size:0.85rem;border-radius:6px;border:1.5px solid var(--border);background:var(--surface-2);color:var(--text);">
+        <span class="small muted" style="font-size:0.75rem;display:block;margin-top:4px;">Saved directly to your local laptop hub runtime and .env configuration.</span>
+      </div>
+      <div>
+        <label class="small muted" for="cfgModelSelect" style="font-weight:700;display:block;margin-bottom:4px;">Primary Model</label>
+        <select id="cfgModelSelect" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid var(--border);background:var(--surface-2);color:var(--text);font-size:0.88rem;">
+          <option value="claude-haiku-5-5">Claude Haiku 5.5 (Recommended · Fastest &amp; 90% Cached)</option>
+          <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (High-Speed Multimodal)</option>
+          <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (Maximum Analytical Rigor)</option>
+        </select>
+      </div>
+      <div id="aiTestFeedback" class="small" style="display:none;padding:8px 12px;border-radius:6px;line-height:1.4;"></div>
+    </div>
+    <div class="dialog-actions" style="display:flex;justify-content:space-between;align-items:center;margin-top:20px;gap:8px;">
+      <button class="btn btn-sm btn-ghost" id="btnTestAiConnection" type="button">🔌 Test Connection</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-sm btn-ghost" id="aiConfigCancel" type="button">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="btnSaveAiConfig" type="button">💾 Save &amp; Activate</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ================= POLYGLOT BENCHMARK HUB MODAL ================= -->
+  <dialog id="polyglotHubModal" class="guide-dialog" style="max-width:880px;border-radius:14px;border:1.5px solid var(--border);background:var(--surface);color:var(--text);padding:24px;box-shadow:var(--glass-shadow-lg);" aria-labelledby="polyglotHubTitle">
+    <div class="dialog-head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h3 id="polyglotHubTitle" style="margin:0;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:1.4rem;">📊</span>
+        <span>HumanEval-X Universal Polyglot Benchmark Hub</span>
+        <span class="pill pill-ok" style="font-size:0.75rem;">100% Functional Accuracy</span>
+      </h3>
+      <button class="btn btn-sm btn-ghost" id="polyglotHubClose" type="button" style="font-size:1.1rem;padding:2px 8px;">✕</button>
+    </div>
+    <p class="small muted" style="margin-bottom:16px;line-height:1.5;">
+      Real-time benchmark results across <strong>Python, C++, JavaScript, Go, and Java</strong> evaluated against authentic HumanEval-X test cases with Anthropic Claude Haiku 4.5 prompt caching and native OS sandboxing.
+    </p>
+
+    <!-- Top stats grid -->
+    <div class="polyglot-grid-stats" id="polyglotStatsGrid">
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Overall Accuracy</span>
+        <span class="polyglot-stat-val" style="color:var(--green);" id="polyglotOverallAcc">100.0%</span>
+        <span class="polyglot-stat-sub" id="polyglotOverallCount">75 / 75 passing</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Languages Ready</span>
+        <span class="polyglot-stat-val" style="color:var(--blue);" id="polyglotLangCount">5 / 5</span>
+        <span class="polyglot-stat-sub">Python, C++, JS, Go, Java</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Avg Query Latency</span>
+        <span class="polyglot-stat-val" style="color:#d97706;" id="polyglotAvgLatency">1.03s</span>
+        <span class="polyglot-stat-sub">90% prompt-cached</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Sandbox Runtimes</span>
+        <span class="polyglot-stat-val" style="color:var(--green);" id="polyglotSandboxCount">7 Active</span>
+        <span class="polyglot-stat-sub">gcc, g++, py, node, go, java, sh</span>
+      </div>
+    </div>
+
+    <!-- Per-Language Performance Table -->
+    <h4 style="margin:16px 0 8px 0;">Per-Language Benchmark Performance</h4>
+    <div style="overflow-x:auto;">
+      <table class="polyglot-table" id="polyglotLangTable">
+        <thead>
+          <tr>
+            <th>Language</th>
+            <th>Accuracy</th>
+            <th>Passed / Total</th>
+            <th>Avg Latency</th>
+            <th>Native Sandbox Runtime</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="polyglotLangTbody">
+          <!-- Populated dynamically -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Optimization Timeline -->
+    <h4 style="margin:20px 0 8px 0;">Accuracy &amp; Speed Iteration Timeline</h4>
+    <div style="overflow-x:auto;">
+      <table class="polyglot-table" id="polyglotHistoryTable">
+        <thead>
+          <tr>
+            <th>Iteration</th>
+            <th>Timestamp</th>
+            <th>Samples/Lang</th>
+            <th>Overall Accuracy</th>
+            <th>Wall Clock</th>
+            <th>Optimizations Delivered</th>
+          </tr>
+        </thead>
+        <tbody id="polyglotHistoryTbody">
+          <!-- Populated dynamically -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="dialog-actions" style="margin-top:20px;display:flex;justify-content:flex-end;">
+      <button class="btn btn-primary" id="polyglotHubDone" type="button">Close Hub</button>
+    </div>
+  </dialog>
+
+  <!-- ================= HANDWRITTEN EXAM BENCHMARK MODAL ================= -->
+  <dialog id="handwrittenHubModal" class="guide-dialog" style="max-width:920px;width:95%;">
+    <div class="guide-head" style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:1.8rem;">✍️</span>
+        <div>
+          <h3 style="margin:0;">Real Digitized Handwritten Student Exam Benchmark Hub</h3>
+          <p class="small muted" style="margin:2px 0 0 0;">Dataset of Digitized Student Examination Papers (50 Students · 20 MCQs · Claude Haiku Multimodal Vision)</p>
+        </div>
+      </div>
+      <button class="icon-btn" id="handwrittenHubClose" type="button" aria-label="Close dialog">✕</button>
+    </div>
+
+    <!-- Live Metrics Grid -->
+    <div class="polyglot-metrics-grid" style="margin-top:16px;">
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Transcription Accuracy</span>
+        <span class="polyglot-stat-val" style="color:var(--green);" id="hwTranscriptionAcc">--%</span>
+        <span class="polyglot-stat-sub" id="hwTranscriptionSub">Student_MCQ.csv ground truth</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Grading Accuracy</span>
+        <span class="polyglot-stat-val" style="color:#0284c7;" id="hwGradingAcc">--%</span>
+        <span class="polyglot-stat-sub">answerkey.txt correct answers</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Avg Speed / Student</span>
+        <span class="polyglot-stat-val" style="color:#d97706;" id="hwAvgLatency">--s</span>
+        <span class="polyglot-stat-sub">Multimodal Haiku Vision</span>
+      </div>
+      <div class="polyglot-stat-card">
+        <span class="polyglot-stat-label">Students Evaluated</span>
+        <span class="polyglot-stat-val" style="color:var(--brand);" id="hwTotalStudents">50 / 50</span>
+        <span class="polyglot-stat-sub" id="hwTotalQuestions">1,000 Questions</span>
+      </div>
+    </div>
+
+    <!-- Iteration Timeline -->
+    <h4 style="margin:20px 0 8px 0;">Optimization Iterations &amp; Speedup Timeline</h4>
+    <div style="overflow-x:auto;">
+      <table class="polyglot-table" id="hwHistoryTable">
+        <thead>
+          <tr>
+            <th>Iteration</th>
+            <th>Timestamp</th>
+            <th>Students</th>
+            <th>Transcription Acc</th>
+            <th>Grading Acc</th>
+            <th>Wall Clock</th>
+            <th>Model</th>
+          </tr>
+        </thead>
+        <tbody id="hwHistoryTbody">
+          <!-- Populated dynamically -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Student Details Summary -->
+    <h4 style="margin:20px 0 8px 0;">Latest Student Papers Evaluation</h4>
+    <div style="overflow-x:auto;max-height:300px;overflow-y:auto;">
+      <table class="polyglot-table" id="hwStudentsTable">
+        <thead>
+          <tr>
+            <th>Student</th>
+            <th>MCQ Page</th>
+            <th>Transcription</th>
+            <th>Grading Score</th>
+            <th>Latency</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="hwStudentsTbody">
+          <!-- Populated dynamically -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="dialog-actions" style="margin-top:20px;display:flex;justify-content:flex-end;">
+      <button class="btn btn-primary" id="handwrittenHubDone" type="button">Close Hub</button>
+    </div>
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

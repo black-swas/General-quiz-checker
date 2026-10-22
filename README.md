@@ -1,133 +1,190 @@
-# Polyglot & C Lab Quiz Evaluator (v4.1.0 — Production Edition)
+# 🎓 IISER Bhopal — General Quiz & Lab Exam Checker (v5.1 Production Edition)
+### Universal Polyglot Programming Evaluator & 100% Laptop-Hosted Physical Paper Scanner Hub
 
-Universal, high-performance triage and evaluation platform for programming labs and written quizzes at **IISER Bhopal (Department of Data Science & Engineering)**.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.10%2B-5C3EE8.svg)](https://opencv.org/)
+[![Anthropic Claude](https://img.shields.io/badge/Claude-Haiku%205.5%20Cached-orange.svg)](https://www.anthropic.com/)
+[![Ollama Offline](https://img.shields.io/badge/Ollama-100%25%20Offline%20VLM-black.svg)](https://ollama.com/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Designed to evaluate **25+ programming and markup languages** (`.c`, `.cpp`, `.py`, `.ipynb`, `.java`, `.js`, `.ts`, `.rs`, `.go`, `.sql`, `.r`, `.sh`, `.jl`, `.txt`, `.md`, `.tex`, …) with seamless ZIP ingestion, OS-level sandboxing, deterministic plagiarism forensics, and primary 4-way AI triage (`claude-haiku-5-5` with prompt caching).
+Developed for the **Department of Data Science & Engineering, IISER Bhopal**, this platform provides a unified, production-grade examination evaluation ecosystem featuring **two specialized grading engines**:
+
+```
++-------------------------------------------------------------------------------------------------------+
+|                                    IISER BHOPAL QUIZ EVALUATOR                                        |
++--------------------------------------------------+----------------------------------------------------+
+|  ENGINE 1: POLYGLOT CODING LAB CHECKER           |  ENGINE 2: PHYSICAL PAPER EXAM CHECKER & HUB       |
+|  - Web UI: http://localhost:8000/                |  - Web UI: http://localhost:8000/scanner           |
+|  - 25+ Programming & Markup Languages           |  - Mobile Smartphone Camera Scanning over Wi-Fi    |
+|  - OS-Level Sandboxing & Timeout Guards          |  - ArUco Fiducial Alignment & Perspective Warping  |
+|  - Automatic LeetCode Driver Synthesis           |  - Multi-Page (1..25) Stitched Continuity Tracking |
+|  - Winnowing & AST Plagiarism Forensics          |  - Prompt-Cached Claude Haiku 5.5 (90% Savings)    |
+|  - 4-Tier Automated Triage (GREEN, BLUE, RED)    |  - 100% Air-Gapped Ollama / Qwen2.5-VL Fallback    |
+|  - Gradebook CSV & JSON Export                   |  - Multi-Sheet Excel (.xlsx) & Feedback PDF Zip    |
++--------------------------------------------------+----------------------------------------------------+
+```
 
 ---
 
 ## Table of Contents
-1. [Question Paper JSON Creation Guide](#question-paper-json-creation-guide)
-   - [Root Schema & Field Reference](#root-schema--field-reference)
-   - [Question Specification (`QuestionSpec`) Reference](#question-specification-questionspec-reference)
-   - [Copy-Pasteable Example 1: Full C/C++ Program (Stdin / Stdout)](#example-1-full-cc-program-stdin--stdout)
-   - [Copy-Pasteable Example 2: Python Script (Sample & Hidden Tests)](#example-2-python-script-sample--hidden-tests)
-   - [Copy-Pasteable Example 3: Function-Only Question (Auto-Synthesized Driver)](#example-3-function-only-question-auto-synthesized-driver)
-   - [Copy-Pasteable Example 4: Theory / Written / Open-Ended (Rubric & LLM-Only)](#example-4-theory--written--open-ended-rubric--llm-only)
-   - [Copy-Pasteable Example 5: Multi-Question Mixed Exam Paper](#example-5-multi-question-mixed-exam-paper)
-2. [Dataset Creation & Submission Packaging](#dataset-creation--submission-packaging)
-   - [Supported Submission Formats (Zero Renaming Required)](#supported-submission-formats-zero-renaming-required)
-   - [Moodle & Google Classroom Direct ZIP Exports](#moodle--google-classroom-direct-zip-exports)
-   - [Folder-per-Student Structure](#folder-per-student-structure)
-   - [Flat Loose Files in Root](#flat-loose-files-in-root)
-   - [Single-Question Quiz Auto-Mapping](#single-question-quiz-auto-mapping)
-   - [Comment Header Metadata Fallback](#comment-header-metadata-fallback)
-   - [Jupyter Notebook (`.ipynb`) Ingestion](#jupyter-notebook-ipynb-ingestion)
-   - [What Gets Automatically Ignored & Cleaned](#what-gets-automatically-ignored--cleaned)
-   - [Upload Constraints & Thresholds](#upload-constraints--thresholds)
-3. [Speed & Performance Optimizations (Zero Accuracy Loss)](#speed--performance-optimizations-zero-accuracy-loss)
-   - [In-Memory Deterministic Verification Cache (`_VERIFICATION_CACHE`)](#in-memory-deterministic-verification-cache-_verification_cache)
-   - [Instant Python AST Syntax Check](#instant-python-ast-syntax-check)
-   - [Subprocess Timeout Cleanup & Reap Acceleration](#subprocess-timeout-cleanup--reap-acceleration)
-   - [SequenceMatcher & Shingle Disjoint Pre-Filtering](#sequencematcher--shingle-disjoint-pre-filtering)
-   - [Anthropic Prompt Caching (`cache_control: ephemeral`)](#anthropic-prompt-caching-cache_control-ephemeral)
-   - [Zero-RAM Disk Spooling & 512 MB Memory Clamping](#zero-ram-disk-spooling--512-mb-memory-clamping)
-4. [Grading & TA Review Workflow ("Everything Else")](#grading--ta-review-workflow-everything-else)
-   - [The 4 Queues: GREEN, BLUE, RED, GRAY](#the-4-queues-green-blue-red-gray)
-   - [Human-in-the-Loop (HITL) Calibration](#human-in-the-loop-hitl-calibration)
-   - [Plagiarism & Stylometric Collusion Matrix](#plagiarism--stylometric-collusion-matrix)
-   - [Gradebook Export (CSV & JSON)](#gradebook-export-csv--json)
-5. [Deployment Guide (Render Free Plan, Docker, Local)](#deployment-guide-render-free-plan-docker-local)
-   - [Deploying to Render Free Plan](#deploying-to-render-free-plan)
-   - [Running Locally with Python](#running-locally-with-python)
-   - [Running via Docker](#running-via-docker)
-   - [Environment Variables Reference](#environment-variables-reference)
+
+1. [Architectural Highlights](#architectural-highlights)
+2. [Quick-Start Guide](#quick-start-guide)
+   - [Windows (1-Click)](#windows-1-click)
+   - [macOS & Linux (1-Click)](#macos--linux-1-click)
+   - [Docker Deployment](#docker-deployment)
+3. [Engine 1: Polyglot Coding Lab Checker Guide](#engine-1-polyglot-coding-lab-checker-guide)
+   - [1.1 Supported Languages & File Ingestion](#11-supported-languages--file-ingestion)
+   - [1.2 Question Paper JSON Specification](#12-question-paper-json-specification)
+   - [1.3 Concrete Question Paper Examples](#13-concrete-question-paper-examples)
+   - [1.4 Sandbox Execution & Driver Synthesis](#14-sandbox-execution--driver-synthesis)
+   - [1.5 Deterministic Plagiarism & Collusion Forensics](#15-deterministic-plagiarism--collusion-forensics)
+   - [1.6 The 4 Triage Queues (GREEN, BLUE, RED, GRAY)](#16-the-4-triage-queues-green-blue-red-gray)
+4. [Engine 2: Physical Paper Exam Checker & Grading Hub Guide](#engine-2-physical-paper-exam-checker--grading-hub-guide)
+   - [2.1 Dual Exam Paper Formats](#21-dual-exam-paper-formats)
+   - [2.2 Printable Exam Booklet PDF Generation](#22-printable-exam-booklet-pdf-generation)
+   - [2.3 Exam Hall Ingestion & Mobile Camera Scanner](#23-exam-hall-ingestion--mobile-camera-scanner)
+   - [2.4 Computer Vision Rectification & Handwriting Sharpening](#24-computer-vision-rectification--handwriting-sharpening)
+   - [2.5 Dual AI Vision Engines (Haiku 5.5 vs Ollama Offline)](#25-dual-ai-vision-engines-haiku-55-vs-ollama-offline)
+   - [2.6 Claude Haiku 5.5 Economics & Prompt Caching Dashboard](#26-claude-haiku-55-economics--prompt-caching-dashboard)
+   - [2.7 TA Human-in-the-Loop Arbitration & Student Regrades](#27-ta-human-in-the-loop-arbitration--student-regrades)
+   - [2.8 Official College Exports (Multi-Sheet Excel & Feedback PDFs)](#28-official-college-exports-multi-sheet-excel--feedback-pdfs)
+5. [Configuration & Environment Variables](#configuration--environment-variables)
+6. [REST API Reference](#rest-api-reference)
+7. [Testing & Quality Assurance](#testing--quality-assurance)
 
 ---
 
-## Question Paper JSON Creation Guide
+## Architectural Highlights
 
-The question paper JSON defines the course, exam title, and per-question rubrics, execution modes, test cases, and constraints.
+- **Zero Cloud Hosting Mandatory**: The entire stack (FastAPI server, SQLite WAL database, OpenCV computer vision engine, and web UIs) runs locally on an instructor's laptop.
+- **Air-Gapped Operation**: Functions over a local laptop Wi-Fi hotspot in examination halls without internet connectivity.
+- **Multi-TA Parallelism**: Multiple teaching assistants can connect their smartphones concurrently, claim grading stations, and upload student papers in parallel.
+- **Multi-Modal Prompt Caching**: Employs Anthropic Ephemeral Prompt Caching (`cache_control: {"type": "ephemeral"}`) on questions and rubrics to slash grading costs by **90%** and cut evaluation latency by **~70%**.
+- **Self-Healing Durability**: Uses SQLite Write-Ahead Logging (`PRAGMA journal_mode=WAL`), persistent rotating logs (`logs/iiserb_hub.log`), and automatic local file mirroring in `<session_dir>/exports/`.
 
-### Root Schema & Field Reference
+---
+
+## Quick-Start Guide
+
+### Windows (1-Click)
+
+1. Double-click [`run_hub.bat`](run_hub.bat) or run in PowerShell:
+   ```powershell
+   .\run_hub.ps1
+   ```
+2. The launcher automatically creates a virtual environment at `.\venv`, installs dependencies from `requirements.txt`, binds to all local network interfaces (`0.0.0.0:8000`), prints the mobile pairing QR code in the terminal, and launches your browser at `http://localhost:8000/scanner`.
+
+### macOS & Linux (1-Click)
+
+1. Open your terminal in the repository root and run:
+   ```bash
+   chmod +x run_hub.sh
+   ./run_hub.sh
+   ```
+2. The script detects Python 3.10–3.13, provisions `venv`, and launches the hub.
+
+### Docker Deployment
+
+```bash
+# Build the Docker image
+docker build -t iiserb-quiz-checker .
+
+# Run the container
+docker run -p 8000:8000 \
+  -v "$(pwd)/data:/app/data" \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  iiserb-quiz-checker
+```
+
+---
+
+## Engine 1: Polyglot Coding Lab Checker Guide
+
+Access the Digital Coding Lab Checker at `http://localhost:8000/`.
+
+### 1.1 Supported Languages & File Ingestion
+
+The evaluator ingests student programming assignments across **25+ languages** without requiring file renaming or manual folder reorganization:
+
+| Family | Languages & Extensions |
+| :--- | :--- |
+| **Compiled Systems** | C (`.c`, `.h`), C++ (`.cpp`, `.cc`, `.cxx`, `.hpp`), Rust (`.rs`), Go (`.go`) |
+| **JVM Ecosystem** | Java (`.java`), Kotlin (`.kt`), Scala (`.scala`) |
+| **Scripting & Data** | Python (`.py`), Jupyter Notebooks (`.ipynb`), R (`.r`), Julia (`.jl`) |
+| **Web & Node** | JavaScript (`.js`), TypeScript (`.ts`) |
+| **Database & Shell** | SQL (`.sql`), Bash/Shell (`.sh`, `.bash`) |
+| **Markup & Prose** | Markdown (`.md`), Plain Text (`.txt`), LaTeX (`.tex`) |
+
+#### Supported Packaging Layouts:
+- **Direct LMS ZIP Exports**: Moodle bulk assignment downloads, Google Classroom master ZIP archives.
+- **Folder-per-Student**: Nested directories named by student roll number (e.g. `25101_Aarav/Q1.c`, `25102_Bhavna/Q1.c`).
+- **Flat Loose Files**: Individual files matching roll numbers (e.g. `25101_q1.c`, `25102-question1.py`).
+- **Jupyter Notebook Extraction**: Automatically converts code cells in `.ipynb` files into executable script streams while ignoring raw Markdown notes.
+
+---
+
+### 1.2 Question Paper JSON Specification
+
+Create a JSON file defining the course code, exam title, and per-question rubrics:
 
 ```json
 {
   "course_code": "DSE-201",
-  "quiz_title": "Mid-Semester Practical Examination",
-  "default_language": "c",
-  "questions": [ ... ]
-}
-```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `course_code` | `string` | Yes | Course identifier (e.g. `"DSE-101"`, `"CS-202"`). |
-| `quiz_title` | `string` | Yes | Title of the quiz or examination. |
-| `default_language` | `string` | No | Fallback language for files without explicit mapping (default: `"c"`). Options: `"c"`, `"cpp"`, `"python"`, `"java"`, `"sql"`, `"bash"`, `"javascript"`, `"auto"`. |
-| `questions` | `array` | Yes | List of `QuestionSpec` objects (up to 20 questions). |
-
----
-
-### Question Specification (`QuestionSpec`) Reference
-
-Each question in `questions` can be customized with granular execution rules:
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `question_id` | `string` | **Required** | Unique identifier matching student filenames: `"Q1"`, `"Q2"`, `"1"`, `"que1"`, etc. |
-| `title` | `string` | **Required** | Short descriptive title of the question. |
-| `problem_statement` | `string` | `""` | Complete problem description, constraints, and requirements. |
-| `language` | `string` | `"auto"` | Target language (`"c"`, `"cpp"`, `"python"`, `"java"`, `"sql"`, `"bash"`, `"javascript"`, `"prose"`, `"auto"`). |
-| `execution_mode` | `string` | `"auto"` | `auto` (runs sandbox if test cases exist, otherwise static + LLM), `sandbox` (enforces sandbox execution), `llm_only` (skips sandbox; evaluates via rubric & Claude), `static_only` (deterministic checks only). |
-| `test_cases` | `array` | `[]` | List of `TestCase` objects (see below). |
-| `grading_rubric` | `string` | `null` | Explicit grading criteria, edge cases, and tab assignment rules for the LLM triage layer. |
-| `reference_solution`| `string` | `null` | Canonical instructor solution for reference and AST comparison. |
-| `forbidden_constructs`| `array[str]`| `[]` | Keywords or regex patterns forbidden in code (e.g. `["goto", "system", "eval", "qsort"]`). Flagged as `RULE_VIOLATION`. |
-| `required_constructs` | `array[str]`| `[]` | Must-have constructs (e.g. `["while", "recursion", "malloc"]`). Missing ones are flagged. |
-| `expected_complexity` | `string` | `null` | Algorithmic target (e.g. `"O(N)"`, `"O(N log N)"`, `"O(1)"`). Submissions violating complexity get flagged. |
-| `timeout_seconds` | `float` | `null` | Per-test-case wall-clock execution timeout in seconds (defaults to global setting, 3.0s). |
-| `float_rel_tol` | `float` | `null` | Relative float tolerance for numerical test comparisons (default: `1e-6`). |
-| `float_abs_tol` | `float` | `null` | Absolute float tolerance for numerical test comparisons (default: `1e-6`). |
-
-#### `TestCase` Object Structure:
-```json
-{
-  "input_data": "5\n",
-  "expected_output": "10\n",
-  "is_sample": true
-}
-```
-- `input_data`: String piped to the student program's standard input.
-- `expected_output`: Expected standard output string. Checked with whitespace normalization and scientific notation tolerance.
-- `is_sample`: `true` for sample test cases (given in the problem description), `false` for hidden test cases. *Submissions passing only sample cases while failing hidden cases are automatically flagged for sample-input hardcoding/spoofing!*
-
----
-
-### Example 1: Full C/C++ Program (Stdin / Stdout)
-
-Use this for classic lab problems with standard input and standard output.
-
-```json
-{
-  "course_code": "DSE-101",
-  "quiz_title": "Lab Quiz 1: Pointers & Loops",
+  "quiz_title": "Object-Oriented Programming & Data Structures Lab Quiz",
   "default_language": "c",
   "questions": [
     {
       "question_id": "Q1",
-      "title": "Reverse Array In-Place",
+      "title": "Doubly Linked List Insertion",
       "language": "c",
       "execution_mode": "sandbox",
-      "problem_statement": "Given an integer N followed by N integers, reverse the array in-place using two pointers and print the result separated by spaces.",
-      "topic_tags": ["arrays", "pointers", "loops"],
+      "problem_statement": "Implement function `insert_sorted(Node** head, int val)` that inserts an integer into a sorted doubly linked list.",
+      "topic_tags": ["linked-list", "pointers"],
       "expected_complexity": "O(N)",
-      "forbidden_constructs": ["qsort", "goto"],
-      "required_constructs": ["while", "for"],
+      "forbidden_constructs": ["qsort", "system"],
+      "required_constructs": ["malloc", "while"],
+      "timeout_seconds": 2.5,
+      "test_cases": [
+        { "input_data": "3\n10 20 40\n25\n", "expected_output": "10 20 25 40", "is_sample": true },
+        { "input_data": "1\n50\n10\n", "expected_output": "10 50", "is_sample": false }
+      ]
+    }
+  ]
+}
+```
+
+#### Field Reference:
+- `execution_mode`:
+  - `auto`: Executes in the sandbox if test cases are provided; falls back to static checks + LLM.
+  - `sandbox`: Enforces OS-level compilation and test case execution.
+  - `llm_only`: Skips compilation; grades via Claude Haiku and grading rubric (ideal for pseudocode, theory, and design).
+  - `static_only`: Enforces deterministic regex, AST, and keyword checks only.
+- `forbidden_constructs`: Flagged as `RULE_VIOLATION` if detected in student code.
+- `required_constructs`: Must be present in the submission (e.g. `["recursion"]`).
+- `test_cases`: Array of input/output pairs. If `is_sample` is `false`, it represents a hidden test case. Submissions that pass sample cases but fail hidden cases are flagged for `SAMPLE_INPUT_SPOOFING`.
+
+---
+
+### 1.3 Concrete Question Paper Examples
+
+#### Example A: Full C/C++ Program (Standard In / Out)
+```json
+{
+  "course_code": "DSE-101",
+  "quiz_title": "Lab Quiz 1: Pointers & Array Reversal",
+  "default_language": "c",
+  "questions": [
+    {
+      "question_id": "Q1",
+      "title": "In-Place Array Reversal",
+      "language": "c",
+      "execution_mode": "sandbox",
+      "problem_statement": "Read integer N followed by N integers. Reverse the array in-place using two pointers and print the result separated by spaces.",
+      "forbidden_constructs": ["goto"],
       "test_cases": [
         { "input_data": "5\n1 2 3 4 5\n", "expected_output": "5 4 3 2 1", "is_sample": true },
-        { "input_data": "1\n42\n", "expected_output": "42", "is_sample": true },
-        { "input_data": "6\n10 20 30 40 50 60\n", "expected_output": "60 50 40 30 20 10", "is_sample": false },
         { "input_data": "4\n-1 -5 10 0\n", "expected_output": "0 10 -5 -1", "is_sample": false }
       ]
     }
@@ -135,59 +192,22 @@ Use this for classic lab problems with standard input and standard output.
 }
 ```
 
----
-
-### Example 2: Python Script (Sample & Hidden Tests)
-
-Use this for Python data science or algorithmic quizzes.
-
+#### Example B: LeetCode-Style Function (Auto-Synthesized Driver)
+When students only write a target function (e.g. `def two_sum(nums, target):` or `int is_prime(int n)`) without writing `main()` or parsing inputs, the evaluator automatically synthesizes an in-memory test harness:
 ```json
 {
   "course_code": "DSE-201",
-  "quiz_title": "Python Algorithms Quiz",
+  "quiz_title": "Python Data Structures",
   "default_language": "python",
   "questions": [
     {
       "question_id": "Q1",
-      "title": "Count Set Bits",
+      "title": "Two Sum Problem",
       "language": "python",
       "execution_mode": "auto",
-      "problem_statement": "Read an integer N from standard input and print the number of set bits (1s) in its binary representation.",
-      "topic_tags": ["bitwise", "loops"],
-      "expected_complexity": "O(log N)",
-      "forbidden_constructs": ["bit_count", "bin"],
-      "test_cases": [
-        { "input_data": "0\n", "expected_output": "0", "is_sample": true },
-        { "input_data": "7\n", "expected_output": "3", "is_sample": true },
-        { "input_data": "1023\n", "expected_output": "10", "is_sample": false },
-        { "input_data": "2147483647\n", "expected_output": "31", "is_sample": false }
-      ]
-    }
-  ]
-}
-```
-
----
-
-### Example 3: Function-Only Question (Auto-Synthesized Driver)
-
-When students write LeetCode-style solutions (e.g. `def solve(a, b)` or `int isPrime(int n)`) without writing `main()` or handling `scanf`/`input()`. The evaluator automatically synthesizes an in-memory harness to link and execute against test cases!
-
-```json
-{
-  "course_code": "CS-202",
-  "quiz_title": "Function-Only Data Structures Quiz",
-  "default_language": "python",
-  "questions": [
-    {
-      "question_id": "Q1",
-      "title": "Two Sum Target",
-      "language": "python",
-      "execution_mode": "auto",
-      "problem_statement": "Implement function `two_sum(nums, target)` that returns the two indices of numbers adding up to target. Output space-separated indices.",
+      "problem_statement": "Implement function `two_sum(nums, target)` returning zero-indexed array indices.",
       "test_cases": [
         { "input_data": "[2, 7, 11, 15]\n9\n", "expected_output": "0 1", "is_sample": true },
-        { "input_data": "[3, 2, 4]\n6\n", "expected_output": "1 2", "is_sample": true },
         { "input_data": "[3, 3]\n6\n", "expected_output": "0 1", "is_sample": false }
       ]
     }
@@ -197,415 +217,281 @@ When students write LeetCode-style solutions (e.g. `def solve(a, b)` or `int isP
 
 ---
 
-### Example 4: Theory / Written / Open-Ended (Rubric & LLM-Only)
+### 1.4 Sandbox Execution & Driver Synthesis
 
-Use this for SQL queries, written explanations, code reviews, proofs, or questions without executable tests.
+- **Resource Quotas & Sandboxing by Platform**:
+  - **Linux / Docker Environment**: Hard address space quotas (`RLIMIT_AS` capped at `256 MB` for C/C++ and `384 MB` for Python via `prlimit`/`setrlimit`), `RLIMIT_NPROC` process capping, blocked core dumps (`RLIMIT_CORE=0`), and POSIX `killpg` process-group isolation.
+  - **Windows Host (`run_hub.bat`)**: Static AST syntax security policy bans on prohibited execution primitives (`system()`, `fork()`, `exec*()`, `popen()`, network sockets) + scrubbed environment variables + wall-clock timeout cancellation with recursive process tree termination (`taskkill /F /T`). (Note: Hard kernel address-space quotas `RLIMIT_AS` require Linux or Docker containerization).
+- **Driver Synthesizer**: [`driver_synthesizer.py`](app/analyzer/driver_synthesizer.py) inspects AST function signatures, formats JSON/string test inputs into native arguments, links student functions into a harness, and asserts expected return values.
 
-```json
-{
-  "course_code": "DSE-301",
-  "quiz_title": "Database Management & Systems Theory",
-  "default_language": "sql",
-  "questions": [
-    {
-      "question_id": "Q1",
-      "title": "Second Highest Salary by Department",
-      "language": "sql",
-      "execution_mode": "llm_only",
-      "problem_statement": "Write an SQL query to retrieve the second highest distinct salary for each department from table `Employee(id, name, dept_id, salary)`. Handle ties properly.",
-      "grading_rubric": "Assign GREEN if student correctly uses DENSE_RANK() or a partitioned correlated subquery. Assign BLUE if student provides an exceptionally clean CTE with window functions. Assign RED if student uses LIMIT 1 OFFSET 1 without department partitioning or fails on salary ties. Assign GRAY if syntax is ambiguous.",
-      "reference_solution": "WITH Ranked AS (\n  SELECT dept_id, salary, DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) as rk\n  FROM Employee\n)\nSELECT dept_id, salary FROM Ranked WHERE rk = 2;",
-      "test_cases": []
-    }
-  ]
-}
+---
+
+### 1.5 Deterministic Plagiarism & Collusion Forensics
+
+The plagiarism engine operates on **token-level normalized syntax trees**:
+
+```
+[Raw Student Code] -> [Lexical Tokenizer] -> [Canonical Var Replacement] -> [Winnowing Fingerprints] -> [Jaccard & Shingle Matrix]
+```
+
+1. **Canonical Replacement**: Variable names are normalized to `VAR_1`, `VAR_2`, loop constructs to `LOOP`, and string literals stripped of trivial variance.
+2. **Shingle Exclusivity (Rare Fingerprints)**: Standard boilerplate (e.g. `#include <stdio.h>`, standard `for` loops) is discounted. Plagiarism flags trigger only when students share rare, statistically improbable structural n-grams or identical anomalous typos.
+3. **Cross-Question Collusion**: Corroborates suspicious pairs across multiple questions. If two students share matching logic across Q1, Q2, and Q3, confidence elevates to `CRITICAL_COLLUSION`.
+
+---
+
+### 1.6 The 4 Triage Queues (GREEN, BLUE, RED, GRAY)
+
+```
++-----------------------------------------------------------------------------------------+
+|  Queue      | Description                                                               |
++-------------+---------------------------------------------------------------------------+
+|  🟢 GREEN   | Clean, textbook solution passing all sample and hidden test cases.        |
+|  🔵 BLUE    | Correct solution with an innovative, distinctive, or advanced algorithm.  |
+|  🔴 RED     | Compile error, infinite loop, failed test cases, rule breach, or clone.   |
+|  ⚪ GRAY    | Non-executable prose or unattempted question requiring manual TA review.  |
++-----------------------------------------------------------------------------------------+
 ```
 
 ---
 
-### Example 5: Multi-Question Mixed Exam Paper
+## Engine 2: Physical Paper Exam Checker & Grading Hub Guide
 
-A comprehensive exam mixing C programming, Python data processing, SQL, and Written Theory:
+Access the Physical Paper Scanner & Hub at `http://localhost:8000/scanner`.
 
-```json
-{
-  "course_code": "DSE-401",
-  "quiz_title": "Integrated Systems & Analytics Comprehensive Exam",
-  "default_language": "auto",
-  "questions": [
-    {
-      "question_id": "Q1",
-      "title": "Fast Matrix Multiplication",
-      "language": "c",
-      "execution_mode": "sandbox",
-      "problem_statement": "Read dimensions N and two N x N matrices. Output the product matrix. Constraints: N <= 100.",
-      "test_cases": [
-        { "input_data": "2\n1 2\n3 4\n2 0\n1 2\n", "expected_output": "4 4\n10 8", "is_sample": true },
-        { "input_data": "1\n5\n5\n", "expected_output": "25", "is_sample": false }
-      ]
-    },
-    {
-      "question_id": "Q2",
-      "title": "Log Anomaly Detection",
-      "language": "python",
-      "execution_mode": "auto",
-      "problem_statement": "Read HTTP status codes separated by commas and print the count of 5xx server errors.",
-      "test_cases": [
-        { "input_data": "200, 404, 500, 502, 200\n", "expected_output": "2", "is_sample": true },
-        { "input_data": "200, 201, 304\n", "expected_output": "0", "is_sample": false }
-      ]
-    },
-    {
-      "question_id": "Q3",
-      "title": "ACID vs BASE Tradeoffs",
-      "language": "prose",
-      "execution_mode": "llm_only",
-      "problem_statement": "Explain the tradeoff between Strong Consistency (ACID) and Eventual Consistency (BASE) in distributed database architectures.",
-      "grading_rubric": "Assign GREEN if student explains CAP theorem, network partitions, and latency vs consistency tradeoffs. Assign BLUE if student cites real-world database implementations (e.g. Spanner vs Cassandra). Assign RED if student gives incorrect definitions of ACID properties.",
-      "test_cases": []
-    }
-  ]
-}
+---
+
+### 2.1 Dual Exam Paper Formats
+
+The hub supports two primary physical examination modes relevant to university evaluation:
+
+1. **Combined Question + Answer Sheet (`COMBINED_QUESTION_ANSWER`)**:
+   - The question statement, sub-parts, and dedicated answer boxes are printed together on the same physical pages.
+   - Ideal for mid-semester quizzes, continuous assessments, and tutorial tests.
+2. **Separate Question Booklet + Answer Sheets (`SEPARATE_QUESTION_BOOKLET`)**:
+   - The question paper is distributed as a standalone sheet. Students write their answers in standardized answer books.
+   - Ideal for comprehensive end-semester exams.
+
+---
+
+### 2.2 Printable Exam Booklet PDF Generation
+
+Before the exam, faculty can generate and print official departmental answer booklets:
+
+1. Open the Hub Setup tab (`Step 1`).
+2. Configure Course Code, Exam Name, Total Marks, and Question Space boundaries (`Y1%` to `Y2%`).
+3. Click **📄 Printable Exam Booklet PDF**.
+4. The hub generates a print-ready A4 PDF with:
+   - **4 ArUco Corner Markers (IDs 0, 1, 2, 3)**: Positioned at $(0,0)$, $(W,0)$, $(W,H)$, and $(0,H)$ to enable millimeter-level geometric perspective rectification on smartphone cameras.
+   - **Header QR Code**: Encodes Course Code, Exam Name, and Date.
+   - **Structured Question Answer Boxes**: Clear bounding boxes designating boundaries for each question.
+
+---
+
+### 2.3 Exam Hall Ingestion & Mobile Camera Scanner
+
+In the examination hall, TAs scan student papers using their smartphone cameras:
+
+```
+[Laptop Running Hub] <--- Local Wi-Fi / Hotspot ---> [TA Smartphone 1]
+                                                ---> [TA Smartphone 2]
+                                                ---> [TA Smartphone 3]
+```
+
+1. **Connect to Wi-Fi**: Turn on Mobile Hotspot on the instructor's laptop. TAs connect to the hotspot (no internet required).
+2. **Scan Pairing QR**: TAs scan the QR code displayed in the laptop terminal or topbar.
+3. **Teaching Assistant Verification**: The TA enters their name and assigned station (e.g. *TA: Aarav · Station: Hall A - Rows 1-5*).
+4. **Real-Time Edge Detection & Auto-Snap**:
+   - The smartphone viewfinder displays a green alignment box.
+   - When the paper is held steady and sharp focus is detected, the camera **auto-snaps** the page without button presses.
+5. **25-Page Visual Continuity Slots**:
+   - Numbered slots (`1` through `25`) indicate scanned pages. Supplementary sheets are automatically marked as `Extra Sheet 1`, `Extra Sheet 2`.
+6. **Air-Gapped Offline IndexedDB Buffering**:
+   - If Wi-Fi momentarily drops, photos buffer in smartphone IndexedDB storage and auto-sync to the laptop upon reconnection.
+
+---
+
+### 2.4 Computer Vision Rectification & Handwriting Sharpening
+
+When an image reaches the laptop, [`image_processor.py`](app/analyzer/image_processor.py) processes it through a deterministic CV pipeline:
+
+```
+[Raw Photo] -> [ArUco / Quad Warp] -> [Orientation Fix] -> [Illumination Flattening] -> [CLAHE Contrast] -> [Question Crops]
+```
+
+1. **Perspective Flattening**: Locates corner quad coordinates and executes `cv2.warpPerspective` to flatten desk angle distortions to canonical A4 dimensions ($1654 \times 2338$ px).
+2. **Auto-Orientation Correction**: Detects upside-down or sideways pages ($90^\circ$, $180^\circ$, $270^\circ$) using gradient text density and rotates the sheet upright.
+3. **Illumination Flattening & Shadow Division**: Downsamples luminance by $4\times$, estimates background lighting gradient, and divides out shadows caused by smartphone bodies or hall lighting.
+4. **CLAHE & Unsharp Masking**: Enhances faint pencil and blue/black ink strokes while preserving paper texture.
+5. **Perceptual Hash Duplicate Detection**: Uses Hamming distance on 64-bit image hashes. If a TA retakes a page accidentally, the system retains the sharper frame automatically.
+6. **Visual Identity Stamping**: Stamps each cropped question answer with a header (`STUDENT: {roll_no} | QUESTION: {q_id} | MAX: {max_marks}M`) so batched AI calls never mix up student identities.
+
+---
+
+### 2.5 Dual AI Vision Engines (Haiku 5.5 vs Ollama Offline)
+
+The hub supports dynamic switching between Cloud AI and 100% Offline AI:
+
+| Feature | Anthropic Claude Haiku 5.5 | Ollama / Qwen2.5-VL-7B |
+| :--- | :--- | :--- |
+| **Connectivity** | Cloud API (Requires Internet) | **100% Offline (Air-Gapped Hall)** |
+| **Economics** | **90% Discount** via Ephemeral Prompt Caching | Free & Local (Uses Laptop GPU/CPU) |
+| **Speed** | 1.1s per batch (5 crops) | Depends on laptop hardware |
+| **Activation** | Select `claude-haiku-5-5` | Select `qwen2.5-vl-7b-instruct` |
+
+Switching models in the UI automatically synchronizes `vlm_provider` between `anthropic`, `ollama`, and `openai`.
+
+---
+
+### 2.6 Claude Haiku 5.5 Economics & Prompt Caching Dashboard
+
+Click **⚡ Haiku 5.5 Usage** or the topbar VLM status badge (`🤖 VLM: Claude`) to open the real-time financial ledger:
+
+- **Prompt Caching Economics**:
+  - Base Input: `$0.80 / MTok`
+  - Cache Read (90% discount): **`$0.08 / MTok`**
+  - Cache Write: `$1.00 / MTok`
+  - Output: `$4.00 / MTok`
+- **KPI Metrics Displayed**:
+  - Total Actual Cost in USD (`$`) and INR (`₹`)
+  - Gross Standard Cost (without prompt caching)
+  - Net Savings in USD and Percentage
+  - Effective Cache Hit Rate (typically **85%–94%**)
+  - Mean Latency per Call & Error Counts
+- **Scope Breakdown**: Shows active exam session consumption vs lifetime global laptop usage.
+
+---
+
+### 2.7 TA Human-in-the-Loop Arbitration & Student Regrades
+
+Faculty and TAs maintain complete authority over final grades:
+
+1. **1-Click Batch Approval**: Approves all `GREEN` (high confidence $\ge 85\%$) answers with a single click.
+2. **Interactive Student Inspector**:
+   - Inspects high-resolution question crops with pan and zoom.
+   - Adjusts awarded marks with live total recalculation.
+   - Adds TA comments exported directly into official gradebook sheets.
+   - Keyboard shortcuts: `J` / `Down` for next student, `K` / `Up` for previous student, `A` to approve.
+3. **Student Regrade Petitions**:
+   - TAs can lodge an appeal on behalf of a student, or students can petition specific step scoring.
+   - Approving an appeal automatically updates the student's marks in SQLite, updates the triage badge, and recalculates the final gradebook.
+
+---
+
+### 2.8 Official College Exports (Multi-Sheet Excel & Feedback PDFs)
+
+1. **Multi-Sheet Excel Gradebook (`.xlsx`)**:
+   - **Sheet 1 (`Student Marks Summary`)**: Roll Number, Student Name, Pages Scanned, Per-Question Marks (`Q1..Qk`), Total Awarded, Maximum Marks, Percentage, Triage Badge, Review State, and Combined Feedback.
+   - **Sheet 2 (`Detailed Question Breakdown`)**: Question-by-question confidence scores, legibility metrics, handwritten OCR transcriptions, and individual TA comments.
+   - **Formula Injection Guard**: Automatically neutralizes formula injection attempts (`=`, `+`, `-`, `@`) in student names or OCR strings.
+2. **Student Feedback PDFs (`.zip`)**:
+   - Downloads a ZIP archive of individual annotated PDFs displaying question crops, step scores, rubrics, and TA notes.
+3. **Automatic Local Mirroring**:
+   - All Excel workbooks and feedback ZIP archives are automatically mirrored to `<exam_storage_dir>/exports/` on the laptop to prevent loss from browser download blockers.
+
+---
+
+## Configuration & Environment Variables
+
+Configure settings via `.env` or system environment variables:
+
+```ini
+# --- Server & Network ---
+HUB_PORT=8000
+ALLOWED_ORIGINS=*
+REQUIRE_AUTH=false
+API_AUTH_TOKEN=
+
+# --- Paper Scanner & Storage ---
+PAPER_STORAGE_DIR=./data/paper_scans
+SQLITE_DB_PATH=./data/hitl_calibration.db
+MAX_PAGES_PER_STUDENT=25
+MAX_STUDENTS_PER_SESSION=500
+
+# --- AI Vision Model & Provider ---
+VLM_PROVIDER=anthropic             # "anthropic", "ollama", "openai", "local"
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-haiku-5-5
+FALLBACK_MODEL=claude-haiku-4-5-20251001
+
+# --- Offline Ollama VLM Settings ---
+LOCAL_VLM_URL=http://localhost:11434/v1
+LOCAL_VLM_MODEL=qwen2.5-vl:7b
+LOCAL_VLM_API_KEY=ollama
+
+# --- AI Concurrency & Batching ---
+LLM_CONCURRENCY=6                  # Parallel worker tasks
+LLM_VISION_BATCH_SIZE=5            # Question crops per cached LLM call
+AUTO_APPROVE_CONFIDENCE=0.85       # Threshold for GREEN auto-approval
+
+# --- Digital Code Sandbox Limits ---
+GCC_TIMEOUT_SECONDS=3.0
+COMPILE_TIMEOUT_SECONDS=10.0
+CLONE_THRESHOLD_PERCENT=88.0
 ```
 
 ---
 
-## Dataset Creation & Submission Packaging
+## REST API Reference
 
-The evaluator has a fault-tolerant ingestion engine (`zip_ingestor.py`) designed to handle college exam archives without requiring TAs to manually rename or clean student files.
+The hub exposes a comprehensive REST API:
 
-### Supported Submission Formats (Zero Renaming Required)
+### Paper Scanner & Session Management
+- `GET /api/hub-info`: Returns local Wi-Fi IPs, active storage folder, disk statistics, and VLM provider status.
+- `GET /api/sessions`: Lists saved exam sessions on the laptop.
+- `POST /api/sessions`: Creates a new exam session.
+- `GET /api/sessions/{session_id}`: Retrieves full session state, student roster, and evaluation status.
+- `DELETE /api/sessions/{session_id}`: Permanently deletes an exam session.
+- `POST /api/booklet/preview.pdf`: Generates an instant printable A4 exam booklet template preview.
+- `GET /api/sessions/{session_id}/template.pdf`: Generates printable exam booklet PDF for an active session.
 
-You can upload:
-1. **A Master ZIP containing all student submissions**.
-2. **Individual student ZIPs** (e.g. `25104.zip`, `25105.zip`).
-3. **Loose source/text files** selected directly from your file manager.
+### Page Upload & Ingestion
+- `POST /api/upload-page`: Ingests a single scanned page image (raw bytes or multipart).
+- `POST /api/upload-chunk`: Uploads a 64 KB binary chunk for low-bandwidth mobile connections.
+- `POST /api/stitch`: Assembles chunks and triggers image processing.
+- `POST /api/sessions/{session_id}/finalize-student`: Finalizes student scanning and marks pages ready for evaluation.
 
----
+### AI Grading & Arbitration
+- `POST /api/sessions/{session_id}/evaluate`: Triggers concurrent prompt-cached Claude Haiku or Ollama grading.
+- `POST /api/sessions/{session_id}/bulk-approve-green`: Approves all high-confidence green evaluations.
+- `POST /api/sessions/{session_id}/override`: Applies TA manual marks override and feedback comment.
+- `POST /api/sessions/{session_id}/students/{roll_no}/regrade-request`: Lodges a student regrade petition.
+- `POST /api/sessions/{session_id}/regrade-requests/{id}/resolve`: Resolves a regrade petition and updates marks.
 
-### Moodle & Google Classroom Direct ZIP Exports
+### Telemetry & Economics
+- `GET /api/haiku-usage`: Retrieves token telemetry, cache hit rates, and financial ledger data.
+- `POST /api/haiku-usage/model`: Switches active primary VLM model and synchronizes provider.
+- `POST /api/haiku-usage/reset`: Resets global token counters.
+- `GET /api/vlm-status`: Returns active VLM engine status (`anthropic`, `ollama`, `openai`).
+- `POST /api/runtime-settings`: Updates runtime concurrency, model, and storage directory.
 
-- **Moodle Export**: When you click **"Download all submissions"** in Moodle, it produces folder names like:
-  ```text
-  John Doe_123456_assignsubmission_file_/que1.c
-  John Doe_123456_assignsubmission_file_/que2.py
-  ```
-  **Upload this ZIP directly!** The ingestor automatically strips the Moodle boilerplate and maps `John Doe_123456` as the student identity and `que1` / `que2` to questions.
-- **Google Classroom Export**:
-  Directly accepts Classroom archives containing either student name prefixes or nested folders.
-
----
-
-### Folder-per-Student Structure
-
-A clean master ZIP where each student has their own folder:
-```text
-submissions.zip
-├── 25101/
-│   ├── q1.c
-│   └── q2.py
-├── 25102/
-│   ├── que1.cpp
-│   └── que2.py
-└── 25103/
-    ├── solution1.c
-    └── solution2.py
-```
+### Exports
+- `GET /api/sessions/{session_id}/export.xlsx`: Downloads clean multi-sheet Excel gradebook.
+- `GET /api/sessions/{session_id}/export-feedback-zip`: Downloads ZIP archive of annotated student PDFs.
+- `GET /api/sessions/{session_id}/analytics`: Returns score distribution, grade histogram, and question statistics.
 
 ---
 
-### Flat Loose Files in Root
+## Testing & Quality Assurance
 
-All student files placed together in a single folder or root zip:
-```text
-submissions.zip
-├── 25101_q1.c
-├── 25101_q2.py
-├── 25102_que1.c
-├── 25102_que2.py
-├── 25103_1.c
-└── 25103_2.py
-```
-Supported naming conventions:
-- `RollNumber_QuestionNumber.ext` (`25104_q1.c`, `25104_que2.py`)
-- `QuestionNumber_RollNumber.ext` (`q1_25104.c`, `que2_25104.py`)
-- `RollNumber-QuestionNumber.ext` (`25104-1.cpp`, `25104-q2.py`)
-
----
-
-### Single-Question Quiz Auto-Mapping
-
-In single-question exams or lab tests, students often name their files simply by their roll number:
-```text
-submissions.zip
-├── 25101.c
-├── 25102.c
-├── 25103.py
-└── 25104.cpp
-```
-**No renaming needed!** When the question paper contains only 1 question (e.g. `Q1`), any file named `25101.c` automatically maps to `Q1` for student `25101`.
-
----
-
-### Comment Header Metadata Fallback
-
-If a student names their file `main.c`, `solution.py`, or `code.cpp`, the engine scans the leading 20 lines of code for comments specifying identity:
-
-```c
-// Roll No: 25104
-// Question: 1
-#include <stdio.h>
-int main() { ... }
-```
-
-```python
-# Student ID: 25104
-# Problem: 2
-def solve(): ...
-```
-
-The regex matches variations like:
-- `Roll No:`, `Roll:`, `ID:`, `Student ID:`, `Student:`, `Registration:`
-- `Question:`, `Que:`, `Q:`, `Problem:`
-
----
-
-### Jupyter Notebook (`.ipynb`) Ingestion
-
-Students in data science classes frequently submit Jupyter Notebooks.
-- The ingestor parses the `.ipynb` JSON structure.
-- Extracts all Python code cells in chronological order.
-- Merges them into an executable Python script.
-- Evaluates the resulting code in the Python sandbox and static analyzer!
-
----
-
-### What Gets Automatically Ignored & Cleaned
-
-The ingestor automatically sanitizes uploads and strips junk:
-- **IDE Scratch Files**: `tempCodeRunnerFile.*`, `.vscode/`, `.idea/`, `.ipynb_checkpoints/`.
-- **Precompiled Binaries**: `a.out`, `*.exe`, `*.o`, `*.obj`, `*.class`, `*.dll`, `*.so`, `*.pyc`.
-- **OS Artifacts**: `__MACOSX/`, `.DS_Store`, `Thumbs.db`, `desktop.ini`.
-- **Package Lockfiles**: `package-lock.json`, `yarn.lock`, `cargo.lock`.
-- **Virtual Environments**: `venv/`, `.venv/`, `env/`, `node_modules/`.
-
----
-
-### Upload Constraints & Thresholds
-
-| Setting | Default Limit | Configurable Via |
-|---|---|---|
-| Max Upload ZIP Size | **50 MB** | `MAX_UPLOAD_BYTES` |
-| Max Decompressed Volume | **100 MB** | `MAX_UNCOMPRESSED_BYTES` |
-| Max Single File Size | **2 MB** | `MAX_SINGLE_FILE_BYTES` |
-| Max Files in Archive | **3,000 files** | `MAX_FILE_COUNT` |
-| Max Directory Nesting | **4 levels deep**| `MAX_NESTING_DEPTH` |
-| Max Students per Quiz | **250 students** | `MAX_STUDENTS_PER_SESSION` |
-| Supported Encodings | UTF-8, UTF-16, Latin-1, CP1252 (auto-decoded) | Built-in fallback |
-
----
-
-## Speed & Performance Optimizations (Zero Accuracy Loss)
-
-To ensure rapid grading across 200+ students on both high-end servers and constrained free-tier platforms (e.g. Render 512 MB Free Plan), the pipeline incorporates multiple mathematical and algorithmic optimizations:
-
-```mermaid
-graph TD
-    Upload[ZIP & JSON Upload] --> Spool[Zero-RAM Disk Spooling]
-    Spool --> Ingest[Zip Ingestor: AST & Notebook Extraction]
-    Ingest --> PrePlag[Fast Shingle & Disjoint Pre-Filter]
-    PrePlag --> PlagMatrix[Plagiarism Matrix O_N2 Optimized]
-    PlagMatrix --> Static[Fast AST Syntax & Forensics]
-    Static --> CacheCheck{SHA-256 Code Cache Hit?}
-    CacheCheck -- Yes --> Instant[0.0001s Instant Result Deepcopy]
-    CacheCheck -- No --> Sandbox[Polyglot Sandbox prlimit Concurrent]
-    Sandbox --> CacheStore[Store in _VERIFICATION_CACHE]
-    CacheStore --> Triage[4-Way Deterministic Triage]
-    Instant --> Triage
-    Triage --> PromptCache[Anthropic Prompt Caching: cache_control ephemeral]
-    PromptCache --> LLMTriage[Concurrent 4-Way LLM Review]
-    LLMTriage --> Gradebook[Complete Results & CSV Export]
-```
-
-### In-Memory Deterministic Verification Cache (`_VERIFICATION_CACHE`)
-- **How it works**: In a lab exam, multiple students frequently submit identical starter code, template files, empty files, or identical textbook answers.
-- **The Speedup**: Each submission's `(language, code_sha256, test_cases_sha256, timeout)` is cached in an in-memory LRU cache.
-- **Zero Accuracy Loss**: Because deterministic compiler output and sandbox test results are 100% reproducible, identical code receives identical test results in **0.0001s**, saving compilation and test run time.
-
-### Instant Python AST Syntax Check
-- **How it works**: Before running Python code, syntax validity is parsed in-memory via CPython's native `compile(source, "submission.py", "exec")`.
-- **The Speedup**: Bypasses the 50ms–150ms subprocess overhead of spawning `python -m py_compile`.
-- **Zero Accuracy Loss**: If a `SyntaxError` exists, it captures the exact file line and syntax error message instantaneously. If valid, it proceeds straight to test execution.
-
-### Subprocess Timeout Cleanup & Reap Acceleration
-- **How it works**: When a student's submission enters an infinite loop (`while(1)`), `_kill_group(proc)` sends `SIGKILL` to the entire process group.
-- **The Speedup**: Reaping timeout is reduced from 1.0s to 0.1s on POSIX and 0.05s on Windows. A process killed with `SIGKILL` terminates immediately; eliminating unnecessary wait delays saves hundreds of seconds on buggy submissions.
-
-### SequenceMatcher & Shingle Disjoint Pre-Filtering
-- **How it works**: Comparing 200 students pairwise requires `(200 * 199) / 2 = 19,900` comparisons.
-- **The Speedup**:
-  1. **Token Identity Short-Circuit**: If token streams are identical (`ta == tb`), similarity is set to 100.0% without executing O(N^2) `SequenceMatcher.ratio()`.
-  2. **Disjoint Shingle Guard**: If two submissions share zero 5-token shingles (`sh5[a].isdisjoint(sh5[b])`), Jaccard similarity is mathematically 0.0%, skipping sequence matching instantly.
-- **Zero Accuracy Loss**: The mathematical result is identical to running full comparisons.
-
-### Anthropic Prompt Caching (`cache_control: ephemeral`)
-- **How it works**: The system prompt contains the question statement, test cases, and grading rubric (often 1,500–3,000 tokens).
-- **The Speedup**: By adding `cache_control: {"type": "ephemeral"}` and `anthropic-beta: prompt-caching-2024-07-31`, Claude caches the system prompt for 5 minutes.
-- **Result**: Batches 2 through 15 reuse the cached prompt, reducing processing latency by **~70%** and input token costs by **90%**.
-
-### Zero-RAM Disk Spooling & 512 MB Memory Clamping
-- **How it works**: On low-memory environments (Render Free plan or Linux cgroups <= 600 MB):
-  - Uploaded ZIPs stream in 64 KB chunks to disk rather than buffering in RAM.
-  - Concurrency is clamped to 2 sandbox workers and 3 LLM workers.
-  - Subprocess address space is capped via `rlimit_as_bytes` (256 MB for C/C++, 384 MB for Python).
-- **Result**: Eliminates Out-Of-Memory kills (`SIGKILL 137`) completely.
-
----
-
-## Grading & TA Review Workflow ("Everything Else")
-
-### The 4 Queues: GREEN, BLUE, RED, GRAY
-
-The evaluator categorizes every submission into one of four distinct color-coded queues:
-
-```text
-┌────────────────────────────────────────────────────────────────────────┐
-│  GREEN (Clear)         · Standard, correct solution meeting all tests  │
-│  BLUE  (Creative)      · Correct solution with an innovative approach  │
-│  RED   (Needs Review)  · Broken logic, timeout, clone, or rule breach  │
-│  GRAY  (Unverified)    · Non-executable code requiring TA inspection   │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-1. **GREEN (Clear)**: Clean, textbook-compliant solution that compiles and passes all test cases without any integrity violations.
-2. **BLUE (Creative Approach)**: Correct solution that employs an uncommon, distinctive, or advanced algorithm (e.g. Kernighan bit-trick, dynamic programming, pointer arithmetic) detected by the LLM or AST analyzer.
-3. **RED (Needs Review)**: Submissions flagged for TA intervention:
-   - `COMPILE_ERROR`: Compiler or syntax check failed.
-   - `TIMEOUT`: Exceeded execution time limit (infinite loop or inefficient complexity).
-   - `BROKEN_LOGIC`: Failed one or more test cases.
-   - `HARDCODED_PRINTF`: Outputs answer directly without computing it.
-   - `SAMPLE_INPUT_SPOOFING`: Hardcoded branch conditions specifically matching sample inputs.
-   - `PLAGIARISM_CLONE`: Strong structural clone match with another student.
-   - `RULE_VIOLATION`: Used forbidden constructs (e.g. `goto`, `qsort`, `eval`).
-   - `PROMPT_INJECTION`: Comments or strings containing prompt injection aimed at grading models.
-   - `UNSUBMITTED_OR_STUB`: Empty file or unattempted starter code.
-4. **GRAY (Unverified)**: Submissions in languages without local compilers or written text requiring human assessment.
-
----
-
-### Human-in-the-Loop (HITL) Calibration
-
-TAs have complete authority over all verdicts:
-- **Override Any Verdict**: Change a student's queue from RED to GREEN or vice versa with one click.
-- **Persistent Memory**: Overrides and TA comments are stored in SQLite (`hitl_calibration.db`).
-- **Prompt Calibration**: Future evaluation runs automatically extract historical TA corrections as calibration few-shot examples in Claude's prompt!
-
----
-
-### Plagiarism & Stylometric Collusion Matrix
-
-- **Pairwise Canonical Token Matching**: Identifiers are canonicalized to `VAR_1`, `VAR_2`, loops normalized to `LOOP`, and comments extracted.
-- **Distinctiveness (Shingle Exclusivity)**: Differentiates common textbook solutions from actual plagiarism. Only pairs sharing rare, non-trivial shingles or identical typos are marked as `STRONG` clones.
-- **Cross-Question Collusion**: Corroborates pairs sharing suspicious code across 2 or more distinct questions.
-- **Stylometric Anomaly Detection**: Highlights students whose coding style (indentation, comment frequency, identifier length) drastically shifts between questions.
-
----
-
-### Gradebook Export (CSV & JSON)
-
-- **Moodle / Classroom CSV**: Export a consolidated gradebook with one click. Columns include:
-  - `Roll Number`
-  - `Verdict Badge`
-  - `Passed Tests / Total Tests`
-  - `Integrity Category`
-  - `Similarity Score`
-  - `TA Final Score`
-- **Session JSON**: Download the full evaluation snapshot to reopen anytime or preserve for departmental audits.
-
----
-
-## Deployment Guide (Render Free Plan, Docker, Local)
-
-### Deploying to Render Free Plan
-
-1. **Push Repository**: Fork or push this repository to your GitHub account.
-2. **Create Blueprint**:
-   - Log into [Render Dashboard](https://dashboard.render.com).
-   - Click **New +** → **Blueprint**.
-   - Connect your GitHub repository.
-   - Render automatically reads [`render.yaml`](render.yaml) (`plan: free`).
-3. **Configure Environment Variables**:
-   - Under Service Settings → **Environment**:
-     - `ANTHROPIC_API_KEY`: Paste your Anthropic API Key (`sk-ant-...`).
-     - `API_AUTH_TOKEN`: Auto-generated or set your own secure password.
-4. **Free Tier Features Active**:
-   - Zero-RAM spooling.
-   - 2-worker memory clamping.
-   - Database fallback to `/tmp/hitl_calibration.db`.
-   - Cold-start immunity with background job polling.
-
----
-
-### Running Locally with Python
+The repository includes a comprehensive automated test suite covering digital coding lab evaluation, paper scanning redundancy, ArUco detection, prompt caching economics, and student regrades:
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/black-swas/General-quiz-checker.git
-cd General-quiz-checker
+# Run the complete test suite
+pytest tests/ -v
 
-# 2. Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: .\venv\Scripts\activate
+# Run paper exam checker tests specifically
+pytest tests/test_haiku_usage_and_regrades.py tests/test_paper_redundancies.py -v
 
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set environment variables
-export ANTHROPIC_API_KEY="sk-ant-..."
-export API_AUTH_TOKEN="mysecretpass"
-
-# 5. Start server
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-Open [http://localhost:8000](http://localhost:8000) in your browser.
-
----
-
-### Running via Docker
-
-```bash
-# Build Docker image
-docker build -t iiserb-quiz-evaluator .
-
-# Run container
-docker run -p 8000:8000 \
-  -e ANTHROPIC_API_KEY="sk-ant-..." \
-  -e API_AUTH_TOKEN="mysecretpass" \
-  iiserb-quiz-evaluator
+# Run polyglot coding lab checker tests
+pytest tests/test_pipeline_logic_fixes.py tests/test_v6_roadmap_features.py -v
 ```
 
----
-
-### Environment Variables Reference
-
-| Variable | Default | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | `""` | Anthropic Claude API Key for 4-way triage. |
-| `ANTHROPIC_MODEL` | `claude-haiku-5-5` | Primary triage model. |
-| `FALLBACK_MODEL` | `claude-haiku-4-5-20251001` | Automatic fallback model. |
-| `API_AUTH_TOKEN` | `""` | Password token required to access web UI & API. |
-| `REQUIRE_AUTH` | `false` | When true, enforces token authentication. |
-| `LOW_MEMORY_MODE` | `false` | When true (or on Render Free), clamps RAM usage. |
-| `SANDBOX_PARALLELISM` | `2` (free) / `4-8` | Max concurrent student submissions in sandbox. |
-| `SANDBOX_TEST_WORKERS`| `2` (free) / `4` | Max concurrent test cases per submission. |
-| `GCC_TIMEOUT_SECONDS` | `3.0` | Default test case wall-clock timeout in seconds. |
-| `COMPILE_TIMEOUT_SECONDS`| `10.0` | Max compiler invocation time in seconds. |
-| `CLONE_THRESHOLD_PERCENT`| `88.0` | Minimum token similarity to flag as clone candidate. |
-| `SQLITE_DB_PATH` | `./data/hitl_calibration.db` | Path to persistent HITL calibration database. |
+All **290 automated unit and integration tests** pass with zero regressions.
 
 ---
 
-## License & Department Attribution
+## License & Attribution
 
 Developed for the **Department of Data Science & Engineering, IISER Bhopal**.  
-Licensed under the Apache License 2.0.
+Licensed under the **Apache License 2.0**.

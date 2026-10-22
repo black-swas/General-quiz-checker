@@ -130,9 +130,9 @@ def _synthesize_cpp_c_driver(raw_code: str, language: str = "cpp") -> Optional[s
     if re.search(r"\bmain\s*\(", raw_code):
         return None
 
-    # Match simple scalar function: e.g. int solve(int a, int b)
+    # Match scalar, void, or vector function: e.g. int solve(int a, int b), void rev(int* a), vector<int> twoSum(...)
     pattern = re.compile(
-        r"^(?:\s*(?:inline|static)\s+)?(int|long\s+long|double|float|bool|char\*|string|std::string)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{",
+        r"^(?:\s*(?:inline|static)\s+)?(void|int|long\s+long|double|float|bool|char\*|string|std::string|(?:std::)?vector<[^>]+>)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{",
         re.M,
     )
     m = pattern.search(raw_code)
@@ -168,6 +168,18 @@ def _synthesize_cpp_c_driver(raw_code: str, language: str = "cpp") -> Optional[s
     if language in ("cpp", "c++"):
         declarations = "\n    ".join(f"{pt} {pn}{{}};" for pt, pn in param_vars)
         reads = " >> ".join(["std::cin"] + cpp_inputs) + ";" if cpp_inputs else ""
+        if ret_type == "void":
+            print_block = f"""    {func_name}({args_call});"""
+        elif "vector" in ret_type:
+            print_block = f"""    auto _ans = {func_name}({args_call});
+    for (size_t _i = 0; _i < _ans.size(); ++_i) {{
+        std::cout << _ans[_i] << (_i + 1 == _ans.size() ? "" : " ");
+    }}
+    std::cout << "\\n";"""
+        else:
+            print_block = f"""    auto _ans = {func_name}({args_call});
+    std::cout << std::boolalpha << _ans << "\\n";"""
+
         harness = f"""
 #include <iostream>
 #include <string>
@@ -178,14 +190,13 @@ int main() {{
     std::cin.tie(NULL);
     {declarations}
     {reads}
-    auto _ans = {func_name}({args_call});
-    std::cout << std::boolalpha << _ans << "\\n";
+{print_block}
     return 0;
 }}
 """
         return raw_code + "\n" + harness
     else:
-        # C driver (supports basic ints/floats)
+        # C driver (supports basic ints/floats/void)
         decl_lines = []
         fmt_parts = []
         amp_vars = []
@@ -203,9 +214,14 @@ int main() {{
 
         scan_fmt = " ".join(fmt_parts)
         scan_args = ", ".join(amp_vars)
-        out_fmt = "%lld\\n" if "long long" in ret_type else ("%f\\n" if "float" in ret_type or "double" in ret_type else "%d\\n")
         decls = "\n    ".join(decl_lines)
         scan_stmt = f'scanf("{scan_fmt}", {scan_args});' if amp_vars else ""
+
+        if ret_type == "void":
+            call_stmt = f"    {func_name}({args_call});"
+        else:
+            out_fmt = "%lld\\n" if "long long" in ret_type else ("%f\\n" if "float" in ret_type or "double" in ret_type else "%d\\n")
+            call_stmt = f'    printf("{out_fmt}", {func_name}({args_call}));'
 
         harness = f"""
 #include <stdio.h>
@@ -214,11 +230,71 @@ int main() {{
 int main(void) {{
     {decls}
     {scan_stmt}
-    printf("{out_fmt}", {func_name}({args_call}));
+{call_stmt}
     return 0;
 }}
 """
         return raw_code + "\n" + harness
+
+
+def _synthesize_js_driver(raw_code: str) -> Optional[str]:
+    """Synthesizes stdin/stdout harness for function-only JavaScript solutions."""
+    if re.search(r"\b(?:process\.stdin|readline|readFileSync)\b", raw_code):
+        return None
+    # Find exported or top-level function: e.g. function solve(...) or const solve = (...) => ...
+    m = re.search(r"^\s*(?:async\s+)?function\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)", raw_code, re.M)
+    if not m:
+        m = re.search(r"^\s*(?:const|let|var)\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|([a-zA-Z0-9_]+))\s*=>", raw_code, re.M)
+    if not m:
+        return None
+
+    fn_name = m.group(1)
+    params_str = m.group(2) or m.group(3) or ""
+    param_count = len([p for p in params_str.split(",") if p.strip()])
+
+    harness = f"""
+// ---------------------------------------------------------------------------
+// Auto-synthesized test driver for function-only JavaScript submission
+// ---------------------------------------------------------------------------
+(() => {{
+    const fs = require('fs');
+    let raw = '';
+    try {{ raw = fs.readFileSync(0, 'utf-8').trim(); }} catch(e) {{}}
+    let args = [];
+    const numParams = {param_count};
+    if (numParams > 0 && raw) {{
+        try {{
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length === numParams) {{
+                args = parsed;
+            }}
+        }} catch(e) {{}}
+        if (args.length === 0) {{
+            const tokens = raw.split(/\\s+/);
+            if (tokens.length === numParams) {{
+                args = tokens.map(t => isNaN(Number(t)) ? t : Number(t));
+            }} else {{
+                const lines = raw.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);
+                if (lines.length === numParams) {{
+                    args = lines.map(t => isNaN(Number(t)) ? t : Number(t));
+                }} else {{
+                    args = [raw];
+                }}
+            }}
+        }}
+    }}
+    try {{
+        const res = typeof {fn_name} === 'function' ? {fn_name}(...args.slice(0, numParams)) : undefined;
+        if (res !== undefined) {{
+            if (typeof res === 'object' && res !== null) console.log(JSON.stringify(res));
+            else console.log(res);
+        }}
+    }} catch(err) {{
+        console.error(err);
+    }}
+}})();
+"""
+    return raw_code + "\n" + harness
 
 
 def synthesize_driver(raw_code: str, language: str) -> Tuple[str, bool]:
@@ -229,5 +305,8 @@ def synthesize_driver(raw_code: str, language: str) -> Tuple[str, bool]:
         return (res, True) if res else (raw_code, False)
     elif lang in ("cpp", "c++", "c"):
         res = _synthesize_cpp_c_driver(raw_code, lang)
+        return (res, True) if res else (raw_code, False)
+    elif lang in ("javascript", "js"):
+        res = _synthesize_js_driver(raw_code)
         return (res, True) if res else (raw_code, False)
     return raw_code, False

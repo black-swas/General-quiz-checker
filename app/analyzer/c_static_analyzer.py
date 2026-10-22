@@ -764,11 +764,17 @@ def check_python_ast_security(raw_code: str) -> List[str]:
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 root_pkg = alias.name.split(".")[0]
-                if root_pkg in ("socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal"):
+                if root_pkg in (
+                    "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
+                    "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
+                ):
                     violations.append(f"Import of restricted system module '{alias.name}'")
         elif isinstance(node, ast.ImportFrom):
             root_pkg = (node.module or "").split(".")[0]
-            if root_pkg in ("socket", "ctypes", "subprocess", "pty", "shutil", "importlib"):
+            if root_pkg in (
+                "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
+                "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
+            ):
                 violations.append(f"Import from restricted system module '{node.module}'")
             elif root_pkg == "os":
                 for alias in node.names:
@@ -843,6 +849,13 @@ def _find_spoof_lines(stripped: str, masked: str, question: Optional[QuestionSpe
     lines_s = stripped.splitlines()
     lines_m = masked.splitlines()
     spoof: List[int] = []
+    sample_outputs: Set[str] = set()
+    for tc in question.test_cases:
+        if tc.is_sample:
+            out_txt = tc.expected_output.strip()
+            if out_txt:
+                sample_outputs.add(out_txt)
+
     for idx, line_m in enumerate(lines_m):
         if not re.search(r"\b(?:if|elif|case|when)\b", line_m) or re.search(r"%\s*\d+\s*==", line_m):
             continue
@@ -857,7 +870,10 @@ def _find_spoof_lines(stripped: str, masked: str, question: Optional[QuestionSpe
         if (nums or words) and re.search(r"\b(?:printf|puts|print|println|cout|echo|return)\b", window_m):
             # Exclude windows where printf/print only prints a computed variable (e.g. printf("%d", sum))
             if not re.search(r'\bprintf\s*\(\s*"[^"]*%[^"]*"\s*,\s*[A-Za-z_]', window_s):
-                spoof.append(idx + 1)
+                is_compound = len(nums) >= 2 or (nums and words)
+                returns_sample_output = any(out in window_s for out in sample_outputs) if sample_outputs else True
+                if is_compound or returns_sample_output:
+                    spoof.append(idx + 1)
     return spoof
 
 

@@ -19,7 +19,6 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY app ./app
-COPY sample_quiz_data ./sample_quiz_data
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Application code is read-only for everyone (student programs cannot modify it);

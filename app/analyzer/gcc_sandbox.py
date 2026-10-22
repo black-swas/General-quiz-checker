@@ -68,10 +68,63 @@ if os.name == "nt":
         "PATH": os.environ.get("PATH", ""),
         "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
         "COMSPEC": os.environ.get("COMSPEC", "cmd.exe"),
+        "TEMP": os.environ.get("TEMP", os.environ.get("TMP", os.path.expanduser("~\\AppData\\Local\\Temp"))),
+        "TMP": os.environ.get("TMP", os.environ.get("TEMP", os.path.expanduser("~\\AppData\\Local\\Temp"))),
+        "USERPROFILE": os.environ.get("USERPROFILE", ""),
+        "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 else:
     SAFE_ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "LC_ALL": "C", "LANG": "C", "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def get_safe_env(language: str = "c", tmpdir: Optional[str] = None) -> Dict[str, str]:
+    """Returns a scrubbed environment dictionary.
+    
+    On Windows, prepends the compiler directory (e.g. MinGW/MSYS2 bin) to PATH so Windows
+    always loads the correct runtime DLLs (libwinpthread-1.dll, libgcc_s_seh-1.dll, etc.)
+    and prevents DLL collision with third-party software installed earlier in system PATH.
+    """
+    env = dict(SAFE_ENV)
+    if os.name == "nt":
+        extra_paths: List[str] = []
+        for bin_name in ("gcc", "g++", "clang", "node", "go", "javac", "java"):
+            target_bin = shutil.which(bin_name)
+            if target_bin:
+                b_dir = os.path.dirname(os.path.abspath(target_bin))
+                if b_dir not in extra_paths and os.path.isdir(b_dir):
+                    extra_paths.append(b_dir)
+        py_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if py_dir not in extra_paths and os.path.isdir(py_dir):
+            extra_paths.append(py_dir)
+
+        # Standard Windows installation paths for MSYS2 MinGW, Go, OpenJDK, and Node.js
+        for fallback_dir in (
+            r"C:\msys64\mingw64\bin",
+            r"C:\Program Files\Go\bin",
+            r"C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot\bin",
+            r"C:\Program Files\nodejs",
+        ):
+            if os.path.isdir(fallback_dir) and fallback_dir not in extra_paths:
+                extra_paths.append(fallback_dir)
+
+        if extra_paths:
+            current_path = env.get("PATH", "")
+            env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + current_path
+
+        if tmpdir:
+            env["TEMP"] = tmpdir
+            env["TMP"] = tmpdir
+            env["TMPDIR"] = tmpdir
+            env["HOME"] = tmpdir
+        if language in ("go", "golang"):
+            env["GO111MODULE"] = "off"
+    elif tmpdir:
+        env["TMPDIR"] = tmpdir
+        env["HOME"] = tmpdir
+        if language in ("go", "golang"):
+            env["GO111MODULE"] = "off"
+    return env
 
 MAX_STDIN_BYTES = 49152  # stays below the 64 KiB pipe buffer so writing never blocks
 _PATH_RE = re.compile(r"(?<![\w\"'.])(?:/[\w.\-]+){2,}")
@@ -80,14 +133,20 @@ _PATH_RE = re.compile(r"(?<![\w\"'.])(?:/[\w.\-]+){2,}")
 @functools.lru_cache(maxsize=1)
 def sandbox_runtimes() -> Dict[str, bool]:
     py_found = bool(shutil.which("python3") or shutil.which("python"))
-    gcc_found = bool(shutil.which("gcc") or shutil.which("clang") or shutil.which("cl"))
-    gpp_found = bool(shutil.which("g++") or shutil.which("clang++") or gcc_found)
+    gcc_found = bool(shutil.which("gcc") or shutil.which("clang") or shutil.which("cl") or os.path.exists(r"C:\msys64\mingw64\bin\gcc.exe"))
+    gpp_found = bool(shutil.which("g++") or shutil.which("clang++") or gcc_found or os.path.exists(r"C:\msys64\mingw64\bin\g++.exe"))
+    node_found = bool(shutil.which("node") or os.path.exists(r"C:\Program Files\nodejs\node.exe"))
+    go_found = bool(shutil.which("go") or os.path.exists(r"C:\Program Files\Go\bin\go.exe"))
+    javac_found = bool(shutil.which("javac") or os.path.exists(r"C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot\bin\javac.exe"))
+    java_found = bool(shutil.which("java") or os.path.exists(r"C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot\bin\java.exe"))
     return {
         "c": gcc_found,
         "cpp": gpp_found,
         "python": py_found,
         "bash": shutil.which("bash") is not None,
-        "javascript": shutil.which("node") is not None,
+        "javascript": node_found,
+        "go": go_found,
+        "java": javac_found and java_found,
     }
 
 
@@ -102,7 +161,10 @@ def gcc_available() -> bool:
 
 
 def runtime_available_for(language: str) -> bool:
-    return sandbox_runtimes().get((language or "c").lower(), False)
+    lang = (language or "c").lower()
+    alias_map = {"js": "javascript", "golang": "go", "c++": "cpp"}
+    canonical = alias_map.get(lang, lang)
+    return sandbox_runtimes().get(canonical, False)
 
 
 def normalize_output(text: str) -> str:
@@ -218,7 +280,16 @@ def sanitize_compiler_errors(stderr_text: str, tmpdir: str) -> str:
     return "\n".join(_PATH_RE.sub("[path]", line) for line in cleaned.splitlines()[:30])
 
 
-def diagnose_case_failure(expected: str, actual: str, rc: int, timed_out: bool, truncated: bool) -> str:
+def diagnose_case_failure(
+    expected: str,
+    actual: str,
+    rc: int,
+    timed_out: bool,
+    truncated: bool,
+    match_mode: str = "exact",
+    rel_tol: float = 1e-4,
+    abs_tol: float = 1e-4,
+) -> str:
     """Classify why a single test case failed to give TAs immediate diagnostic context."""
     if timed_out:
         return "TIMEOUT"
@@ -233,7 +304,7 @@ def diagnose_case_failure(expected: str, actual: str, rc: int, timed_out: bool, 
         if sig == 6:
             return "ABORTED"
         return "RUNTIME_ERROR"
-    if outputs_match(expected, actual):
+    if outputs_match(expected, actual, match_mode=match_mode, rel_tol=rel_tol, abs_tol=abs_tol):
         return "PASS"
 
     exp_toks = expected.split()
@@ -309,9 +380,13 @@ def _kill_group(proc: subprocess.Popen) -> None:
     """SIGKILL the process or process group safely on both POSIX and Windows."""
     if os.name == "nt":
         try:
-            proc.kill()
-        except OSError:
-            pass
+            # On Windows, kill the entire process tree (/T) forcefully (/F) to prevent orphaned compiler/child processes
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except OSError:
+                pass
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -359,11 +434,36 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
         cmd = [sh, "-n", src_path]
         run_argv = [sh, src_path]
         label = "bash"
-    elif lang == "javascript":
-        node = shutil.which("node") or "node"
+    elif lang in ("javascript", "js"):
+        node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
         cmd = [node, "--check", src_path]
         run_argv = [node, src_path]
         label = "node"
+    elif lang in ("go", "golang"):
+        go = shutil.which("go") or r"C:\Program Files\Go\bin\go.exe"
+        bin_target = bin_path if bin_path.endswith(".exe") else (bin_path + ".exe" if os.name == "nt" else bin_path)
+        cmd = [go, "build", "-o", bin_target, src_path]
+        run_argv = [bin_target]
+        label = "go"
+    elif lang == "java":
+        javac = shutil.which("javac") or r"C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot\bin\javac.exe"
+        java = shutil.which("java") or r"C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot\bin\java.exe"
+        cmd = [javac, "-encoding", "UTF-8", "-d", tmpdir, src_path]
+        main_class = "Main"
+        try:
+            with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+                m = re.search(r"\bpublic\s+class\s+([A-Za-z_]\w*)", content)
+                if m:
+                    main_class = m.group(1)
+                else:
+                    m2 = re.search(r"\bclass\s+([A-Za-z_]\w*)\s*\{[^}]*public\s+static\s+void\s+main", content)
+                    if m2:
+                        main_class = m2.group(1)
+        except Exception:
+            pass
+        run_argv = [java, "-cp", tmpdir, main_class]
+        label = "java"
     else:
         return 0, "", False, [], "none"
 
@@ -373,7 +473,7 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
 
     popen_kwargs: Dict[str, Any] = {
         "cwd": tmpdir,
-        "env": dict(SAFE_ENV, TMPDIR=tmpdir),
+        "env": get_safe_env(lang, tmpdir),
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -428,7 +528,7 @@ def execute_binary_capped(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "cwd": tmpdir,
-        "env": dict(SAFE_ENV, HOME=tmpdir, TMPDIR=tmpdir),
+        "env": get_safe_env(lang, tmpdir),
         "bufsize": 0,
     }
     if os.name == "nt":
@@ -440,25 +540,77 @@ def execute_binary_capped(
     proc = subprocess.Popen(argv, **popen_kwargs)
 
     # Windows handling: select() does not support pipe file descriptors on Windows.
+    # We use stream reader threads to cap output at max_output_bytes and terminate runaway flood loops early.
     if os.name == "nt":
+        import threading
         timed_out = truncated = False
-        out_b = err_b = b""
-        try:
-            out_b, err_b = proc.communicate(input=data, timeout=timeout_sec)
-        except subprocess.TimeoutExpired:
-            _kill_group(proc)
+        out_chunks: List[bytes] = []
+        err_chunks: List[bytes] = []
+        out_len = 0
+
+        if data:
             try:
-                out_b, err_b = proc.communicate(timeout=0.05)
+                proc.stdin.write(data)
+            except OSError:
+                pass
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+
+        def _read_out():
+            nonlocal out_len, truncated
+            try:
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    out_len += len(chunk)
+                    if out_len > max_output_bytes:
+                        truncated = True
+                        _kill_group(proc)
+                        break
+                    out_chunks.append(chunk)
             except Exception:
                 pass
-            timed_out = True
 
-        if len(out_b) > max_output_bytes:
-            truncated = True
-            out_b = out_b[:max_output_bytes]
+        def _read_err():
+            try:
+                err_len = 0
+                while True:
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
+                        break
+                    err_len += len(chunk)
+                    if err_len <= 16384:
+                        err_chunks.append(chunk)
+            except Exception:
+                pass
+
+        t_out = threading.Thread(target=_read_out, daemon=True)
+        t_err = threading.Thread(target=_read_err, daemon=True)
+        t_out.start()
+        t_err.start()
+
+        try:
+            proc.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            if not truncated:
+                timed_out = True
+            _kill_group(proc)
+            try:
+                proc.wait(timeout=0.1)
+            except Exception:
+                pass
+
+        t_out.join(timeout=0.3)
+        t_err.join(timeout=0.3)
+
+        out_b = b"".join(out_chunks)[:max_output_bytes]
+        err_b = b"".join(err_chunks)[:16384]
 
         stdout_text = out_b.decode("utf-8", errors="replace")
-        stderr_text = err_b[:16384].decode("utf-8", errors="replace")
+        stderr_text = err_b.decode("utf-8", errors="replace")
         returncode = proc.returncode if proc.returncode is not None else -1
         return stdout_text, stderr_text, returncode, timed_out, truncated
 
@@ -510,12 +662,13 @@ def execute_binary_capped(
             if truncated:
                 break
     finally:
-        _kill_group(proc)
+        if proc.poll() is None:
+            _kill_group(proc)
+            try:
+                proc.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
         sel.close()
-        try:
-            proc.wait(timeout=0.1)
-        except subprocess.TimeoutExpired:
-            pass
         for stream in (proc.stdout, proc.stderr):
             try:
                 stream.close()
@@ -534,6 +687,8 @@ def run_gcc_verification(
     timeout_sec: Optional[float] = None,
     language: str = "c",
     match_mode: str = "exact",
+    float_rel_tol: float = 1e-4,
+    float_abs_tol: float = 1e-4,
 ) -> GccTestResult:
     lang = (language or "c").lower()
     timeout_sec = timeout_sec or settings.test_timeout_seconds
@@ -561,17 +716,35 @@ def run_gcc_verification(
         _test_cases_fingerprint(test_cases),
         round(float(timeout_sec), 3),
         match_mode,
+        round(float(float_rel_tol), 6),
+        round(float(float_abs_tol), 6),
     )
     if cache_key in _VERIFICATION_CACHE:
         _VERIFICATION_CACHE.move_to_end(cache_key)
         return _VERIFICATION_CACHE[cache_key].model_copy(deep=True)
 
-    ext_map = {"c": ".c", "cpp": ".cpp", "python": ".py", "bash": ".sh", "javascript": ".js"}
+    ext_map = {
+        "c": ".c",
+        "cpp": ".cpp",
+        "python": ".py",
+        "bash": ".sh",
+        "javascript": ".js",
+        "js": ".js",
+        "go": ".go",
+        "golang": ".go",
+        "java": ".java",
+    }
     src_ext = ext_map.get(lang, ".c")
-    bin_ext = ".exe" if os.name == "nt" and lang in ("c", "cpp") else ".out"
+    bin_ext = ".exe" if os.name == "nt" and lang in ("c", "cpp", "go", "golang") else ".out"
 
-    with tempfile.TemporaryDirectory(prefix="iiserb_c_sandbox_") as tmpdir:
-        src_path = os.path.join(tmpdir, f"submission{src_ext}")
+    shm_dir = "/dev/shm" if os.path.isdir("/dev/shm") else None
+    with tempfile.TemporaryDirectory(prefix="iiserb_c_sandbox_", dir=shm_dir) as tmpdir:
+        if lang == "java":
+            m_cls = re.search(r"\bpublic\s+class\s+([A-Za-z_]\w*)", raw_code)
+            fname = f"{m_cls.group(1)}.java" if m_cls else "Main.java"
+            src_path = os.path.join(tmpdir, fname)
+        else:
+            src_path = os.path.join(tmpdir, f"submission{src_ext}")
         bin_path = os.path.join(tmpdir, f"submission{bin_ext}")
         with open(src_path, "w", encoding="utf-8", newline="") as fh:
             fh.write(raw_code)
@@ -640,11 +813,18 @@ def run_gcc_verification(
                 if not retry_out[3]:  # cleared timeout on rerun
                     outcomes[t_idx] = retry_out
 
+        rel_tol = float_rel_tol
+        abs_tol = float_abs_tol
+
         for idx, (tc, (out, _err, rc, timed_out, truncated)) in enumerate(zip(test_cases, outcomes), start=1):
             actual = normalize_output(out)
             expected = normalize_output(tc.expected_output)
-            ok = (not timed_out) and (not truncated) and rc == 0 and outputs_match(expected, actual, match_mode=match_mode)
-            fmode = diagnose_case_failure(expected, actual, rc, timed_out, truncated)
+            ok = (not timed_out) and (not truncated) and rc == 0 and outputs_match(
+                expected, actual, match_mode=match_mode, rel_tol=rel_tol, abs_tol=abs_tol
+            )
+            fmode = diagnose_case_failure(
+                expected, actual, rc, timed_out, truncated, match_mode=match_mode, rel_tol=rel_tol, abs_tol=abs_tol
+            )
             if fmode != "PASS" and fmode not in failure_modes:
                 failure_modes.append(fmode)
 

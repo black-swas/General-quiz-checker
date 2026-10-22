@@ -1,4 +1,4 @@
-"""Evaluate one quiz: ingested submissions + question paper -> full polyglot report."""
+"""Evaluate one quiz: ingested submissions + question paper -> full polyglot report (Plagiarism disabled by default)."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,6 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
 
 from app.analyzer.c_static_analyzer import analyze_c_submission
 from app.analyzer.driver_synthesizer import synthesize_driver
@@ -70,25 +69,26 @@ async def run_full_quiz_evaluation(
     if not sandbox_on:
         warnings.append("The execution sandbox is disabled or unavailable, so no tests were run in the sandbox.")
 
-    # ---- Overlapped Pass 1 & Pass 2 (S1)
-    # Plagiarism matrix calculation, cross-question collusion, and stylometric consistency
-    # run in parallel background tasks/threads while static analysis and sandbox verification execute immediately.
     plag_start = time.perf_counter()
     plagiarism_seconds = 0.0
 
-    async def run_one_question_plagiarism(qi: int, q):
-        notify("Comparing submissions", 0.02 + 0.08 * (qi + 0.5) / n_q, f"{q.question_id}: pairwise structural comparison")
-        submissions = {r: students[r][q.question_id]["code"] for r in rolls if q.question_id in students[r]}
-        langs_by_roll = {r: students[r][q.question_id].get("language", "c") for r in rolls if q.question_id in students[r]}
-        clone_map, preview_map = await asyncio.to_thread(
-            run_question_plagiarism_matrix, q.question_id, submissions, None, langs_by_roll
-        )
-        return q.question_id, clone_map, preview_map
-
     async def compute_plagiarism_and_stylometry():
         nonlocal plagiarism_seconds
-        clones_by_q: Dict[str, Dict[str, List[CloneMatch]]] = {}
-        previews_by_q: Dict[str, Dict[str, str]] = {}
+        clones_by_q: Dict[str, Dict[str, List[CloneMatch]]] = {q.question_id: {} for q in questions}
+        previews_by_q: Dict[str, Dict[str, str]] = {q.question_id: {} for q in questions}
+        if not settings.enable_plagiarism:
+            plagiarism_seconds = 0.0
+            return clones_by_q, previews_by_q, 0, [], {}, []
+
+        async def run_one_question_plagiarism(qi: int, q):
+            notify("Comparing submissions", 0.02 + 0.08 * (qi + 0.5) / n_q, f"{q.question_id}: pairwise structural comparison")
+            submissions = {r: students[r][q.question_id]["code"] for r in rolls if q.question_id in students[r]}
+            langs_by_roll = {r: students[r][q.question_id].get("language", "c") for r in rolls if q.question_id in students[r]}
+            clone_map, preview_map = await asyncio.to_thread(
+                run_question_plagiarism_matrix, q.question_id, submissions, None, langs_by_roll
+            )
+            return q.question_id, clone_map, preview_map
+
         for qid, clone_map, preview_map in await asyncio.gather(*(run_one_question_plagiarism(qi, q) for qi, q in enumerate(questions))):
             clones_by_q[qid], previews_by_q[qid] = clone_map, preview_map
         corroborated = await asyncio.to_thread(apply_collusion_corroboration, clones_by_q, len(rolls))
@@ -99,7 +99,6 @@ async def run_full_quiz_evaluation(
 
     plag_task = asyncio.create_task(compute_plagiarism_and_stylometry())
 
-    # ---- static analysis + polyglot sandbox + triage + 4-way LLM (pipelined)
     llm_report = new_llm_report()
     semaphore = asyncio.Semaphore(max(1, settings.sandbox_parallelism))
     evaluations: Dict[str, List[SubmissionEvaluation]] = {}
@@ -128,8 +127,6 @@ async def run_full_quiz_evaluation(
                 was_synthesized = True
 
         if static.is_function_only and not was_synthesized and exec_mode != "sandbox":
-            # LeetCode-style function submission without main() or stdin/stdout driver:
-            # avoid false linker/empty-output failure and let the 4-way LLM evaluator grade it.
             gcc = GccTestResult(
                 language=static.language,
                 runtime_used="none",
@@ -147,12 +144,13 @@ async def run_full_quiz_evaluation(
             )
             if can_run_sandbox:
                 match_mode = getattr(q, "match_mode", "exact")
+                rel_tol = getattr(q, "float_rel_tol", 1e-4)
+                abs_tol = getattr(q, "float_abs_tol", 1e-4)
                 async with semaphore:
                     gcc = await asyncio.to_thread(
-                        run_gcc_verification, runnable_code, q.test_cases, None, static.language, match_mode
+                        run_gcc_verification, runnable_code, q.test_cases, None, static.language, match_mode, rel_tol, abs_tol
                     )
                 if was_synthesized and gcc and not gcc.compiled:
-                    # If auto-synthesized driver signature did not match, fall back cleanly to unverified AI review
                     gcc = GccTestResult(
                         language=static.language,
                         runtime_used="none",
@@ -171,28 +169,20 @@ async def run_full_quiz_evaluation(
     async def evaluate_question(q) -> Tuple[str, List[SubmissionEvaluation]]:
         nonlocal llm_seconds
         todo = [(r, students[r][q.question_id]) for r in rolls if q.question_id in students[r]]
-        # 1. Run static analysis & sandbox verification concurrently
         preliminary = await asyncio.gather(*(evaluate_one(r, m, q) for r, m in todo))
 
-        # 2. Wait for plagiarism & stylometry pass to complete before triage
-        clones_by_q, previews_by_q, _corroborated, _collusion, style_notes_by_sub, _style_warns = await plag_task
-
-        # 3. Deterministic triage
         results: List[SubmissionEvaluation] = []
         for roll, meta, static, gcc in preliminary:
             ev = deterministic_triage(
                 roll, q, meta["filename"], meta["code"], static, gcc,
-                clones_by_q[q.question_id].get(roll, []), previews_by_q[q.question_id].get(roll, ""),
+                [],
+                "",
             )
-            style_note = style_notes_by_sub.get((roll, q.question_id))
-            if style_note:
-                ev.integrity_notes.append(style_note)
             results.append(ev)
             languages_counter[ev.language] += 1
 
         results.sort(key=lambda e: e.roll_no)
 
-        # 4. LLM review
         if settings.llm_available:
             notify("Reviewing with AI evaluator", 0.88, f"{q.question_id}: reviewing {len(results)} submissions")
             t_llm = time.perf_counter()
@@ -203,11 +193,37 @@ async def run_full_quiz_evaluation(
     for qid, q_results in await asyncio.gather(*(evaluate_question(q) for q in questions)):
         evaluations[qid] = q_results
 
-    # Retrieve final cross-question collusion and stylometry warnings from plagiarism task
-    _, _, corroborated_pairs, collusion_pairs, _, stylometry_warnings = await plag_task
+    # Await global plagiarism analysis once, concurrently alongside question evaluations
+    clones_by_q, previews_by_q, corroborated_pairs, collusion_pairs, style_notes_by_sub, stylometry_warnings = await plag_task
+
+    # Post-evaluation plagiarism integration: merge clone matches and stylometry notes
+    if settings.enable_plagiarism:
+        from app.analyzer.triage import _clone_notes
+        for qid, q_evs in evaluations.items():
+            q_clones = clones_by_q.get(qid, {})
+            q_previews = previews_by_q.get(qid, {})
+            for ev in q_evs:
+                c_matches = q_clones.get(ev.roll_no, [])
+                if c_matches:
+                    ev.clone_matches = c_matches
+                    ev.max_clone_similarity = max((c.similarity_percent for c in c_matches), default=0.0)
+                    ev.integrity_notes.extend(_clone_notes(c_matches))
+                    strong = [c for c in c_matches if c.strength == "STRONG"]
+                    if strong and ev.tab_category in ("GREEN", "BLUE"):
+                        top = max(strong, key=lambda c: c.similarity_percent)
+                        ev.tab_category = "RED"
+                        ev.verdict_badge = f"Strong Clone Match ({top.similarity_percent}% with {top.partner_roll_no})"
+                        ev.cheat_type = "PLAGIARISM_CLONE"
+                        ev.instructor_callout = f"Compare with {top.partner_roll_no}. Strong match, not proof: confirm in the Integrity view."
+                        ev.flagged_lines = top.matched_lines_self[:12] or [1]
+                        ev.line_annotations = {str(n): f"Matches {top.partner_roll_no}" for n in ev.flagged_lines}
+                if q_previews.get(ev.roll_no):
+                    ev.normalized_tokens_preview = q_previews[ev.roll_no]
+                s_note = style_notes_by_sub.get((ev.roll_no, qid))
+                if s_note:
+                    ev.integrity_notes.append(s_note)
     sandbox_seconds = round(time.perf_counter() - sandbox_start, 2)
 
-    # ---- assemble matrix & per-question analytics
     matrix: Dict[str, Dict[str, Dict[str, Any]]] = {r: {} for r in rolls}
     counts = {"GREEN": 0, "BLUE": 0, "RED": 0, "GRAY": 0, "NOT_SUBMITTED": 0}
     question_analytics: Dict[str, Dict[str, Any]] = {}
@@ -259,7 +275,7 @@ async def run_full_quiz_evaluation(
         "questions": [q.model_dump() for q in questions],
         "evaluations_by_question": {qid: [e.model_dump() for e in evs] for qid, evs in evaluations.items()},
         "student_matrix": matrix,
-        "collusion_pairs": [c.model_dump() for c in collusion_pairs],
+        "collusion_pairs": [c.model_dump() if hasattr(c, "model_dump") else c for c in collusion_pairs],
         "stylometry_warnings": stylometry_warnings,
         "ingestion_warnings": warnings,
         "ignored_binaries": extracted["ignored_binaries"],
@@ -268,6 +284,7 @@ async def run_full_quiz_evaluation(
             "sandbox": sandbox_on,
             "runtimes": runtimes,
             "llm": report,
+            "plagiarism_enabled": settings.enable_plagiarism,
             "clone_threshold_percent": settings.clone_threshold_percent,
             "corroborated_pairs": corroborated_pairs,
         },

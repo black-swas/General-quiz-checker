@@ -1,9 +1,61 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-.venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
 venv/
-.pytest_cache/
+.venv/
+env/
+ENV/
+
+# Secrets and Environment Variables (CONFIDENTIAL - DO NOT PUSH)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+
+# Logs, Databases and Runtime state (CONFIDENTIAL - DO NOT PUSH)
+logs/
+*.log
 data/
 *.db
+*.sqlite
+*.sqlite3
+
+# Test suites and Coverage (DO NOT PUSH)
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
 haiku_results.txt
+pytest.ini
+requirements-dev.txt
+
+# Datasets and Benchmark Submissions (DO NOT PUSH)
+sample_quiz_data/
+*.zip
+
+# Scratch benchmark and test scripts
+scripts/test_*.py
+scripts/update_key.py
+scripts/solve_remaining.py
+scripts/verify_final_five.py
+scripts/inspect_tasks.py
+scripts/analyze_failures.py
+scripts/handwritten_benchmark.py
+scripts/polyglot_benchmark.py
+
+# Node / frontend build
+node_modules/
+
+# Operating System and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.agents/

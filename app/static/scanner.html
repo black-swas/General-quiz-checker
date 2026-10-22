@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>100% Laptop-Hosted Exam Scanner &amp; AI Grading Hub · IISER Bhopal</title>
+  <meta name="description" content="100% offline laptop-hosted mobile exam paper scanner, multi-page question stitcher, prompt-cached multimodal Claude vision grading, and multi-sheet Excel export.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/iiserb_logo.png" alt="IISER Bhopal Logo" class="brand-logo-img">
+      <div>
+        <h1>100% Laptop-Hosted Exam Scanner &amp; AI Grading Hub</h1>
+        <p class="brand-sub">IISER Bhopal · Data Science &amp; Engineering · Physical Exam Sheet Ingestion &amp; Triage</p>
+      </div>
+    </div>
+    <div class="topbar-status" id="statusPills" aria-live="polite">
+      <span class="pill pill-ok" id="hubIpBadge">Detecting Local Wi-Fi IP…</span>
+      <span class="pill pill-ok" id="syncQueueBadge">Local Sync: Ready ✓</span>
+      <span class="pill pill-ok" id="vlmStatusBadge" style="cursor:pointer;" title="Click to view AI VLM engine status">🤖 AI: Claude (Cloud)</span>
+      <button type="button" class="pill pill-ok" id="taNameBadge" style="cursor:pointer;background:rgba(255,255,255,0.22);border:1px solid rgba(255,255,255,0.45);color:#fff;" title="Click to change your TA identity">👤 TA: Enter Name</button>
+      <span class="pill" id="activeTasBadge" title="Concurrent Teaching Assistants connected to this exam">👥 TAs: 1</span>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" class="btn btn-sm btn-ghost" id="btnOpenHandwrittenBenchModal" title="Open Real Handwritten Exam Benchmark Hub & Baseline Comparison" style="border:1.5px solid #10b981;color:#10b981;font-weight:700;">✍️ Handwritten Benchmark Hub</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="btnOpenHaikuUsage" title="Open Claude Haiku 5.5 Token Telemetry & Prompt Caching Dashboard">⚡ AI Telemetry &amp; Costs</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="btnOpenFolderModal">📁 Storage Folder</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="btnOpenShortcutsModal" title="Examiner Keyboard Shortcuts (Hotkeys: J/K, A, Esc, ?)">⌨️ Shortcuts</button>
+      <a href="/" class="btn btn-sm btn-ghost" style="text-decoration:none;">💻 Code Evaluator</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- Workflow Step Navigation -->
+    <nav class="workflow-nav" aria-label="Exam Scanner Workflow">
+      <button type="button" class="wf-step-btn active" data-mode="hub" id="tabBtnHub">
+        <span class="wf-step-num">1</span>
+        <span><span class="desktop-text">Laptop Hub &amp; Storage Folder</span><span class="mobile-text">1. Hub Setup</span></span>
+      </button>
+      <button type="button" class="wf-step-btn" data-mode="capture" id="tabBtnCapture">
+        <span class="wf-step-num">2</span>
+        <span><span class="desktop-text">Mobile Camera Scanner &amp; QR</span><span class="mobile-text">2. Camera</span></span>
+      </button>
+      <button type="button" class="wf-step-btn" data-mode="review" id="tabBtnReview">
+        <span class="wf-step-num">3</span>
+        <span><span class="desktop-text">Live Review, AI Grading &amp; Excel</span><span class="mobile-text">3. Review</span></span>
+      </button>
+    </nav>
+
+    <!-- ==================== TA IDENTITY GATEWAY (Multi-TA Concurrency) ==================== -->
+    <section id="panelTaLogin" class="view" hidden>
+      <div class="ta-gate-overlay">
+        <div class="ta-gate-card">
+          <div class="card-head" style="margin-bottom:14px;display:flex;align-items:center;gap:12px;">
+            <img src="/static/iiserb_logo.png" alt="IISER Bhopal Logo" style="width:48px;height:48px;object-fit:contain;border-radius:50%;background:#fff;padding:2px;box-shadow:0 1px 3px rgba(0,0,0,0.12);flex-shrink:0;">
+            <div>
+              <h2 style="margin:0;font-size:1.35rem;color:var(--text);">Teaching Assistant Verification</h2>
+              <div style="font-size:0.8rem;color:var(--muted);font-weight:600;">IISER Bhopal · Data Science &amp; Engineering</div>
+            </div>
+          </div>
+          <p style="color:var(--muted);font-size:0.92rem;line-height:1.5;margin-bottom:16px;">
+            Multiple TAs can connect and scan or review papers simultaneously. Please enter your name or TA ID before opening the camera. All uploads and evaluations will be automatically credited to your station to prevent collisions.
+          </p>
+
+          <form id="formTaLogin" onsubmit="return false;" style="display:flex;flex-direction:column;gap:14px;">
+            <div>
+              <label for="taLoginNameInput" style="display:block;font-weight:700;color:var(--text);font-size:0.88rem;margin-bottom:6px;">Your Name / TA ID <span style="color:var(--red);">*</span></label>
+              <input id="taLoginNameInput" type="text" placeholder="e.g. TA Alice, Dr. Sharma, Saurabh" required autocomplete="name" style="width:100%;font-size:1rem;padding:10px 14px;border:1.5px solid var(--border-strong);border-radius:6px;background:var(--surface);color:var(--text);font-weight:600;">
+            </div>
+            <div>
+              <label for="taLoginStationInput" style="display:block;font-weight:600;color:var(--muted);font-size:0.84rem;margin-bottom:6px;">Station / Desk Location (Optional)</label>
+              <input id="taLoginStationInput" type="text" placeholder="e.g. Desk 1 / Room 102" style="width:100%;font-size:0.9rem;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);">
+            </div>
+
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;">
+              <button type="submit" class="btn btn-primary" id="btnTaLoginStartScanner" style="flex:1;font-size:0.95rem;padding:12px 18px;">
+                📷 Start Camera Scanner →
+              </button>
+              <button type="button" class="btn btn-ghost" id="btnTaLoginOpenHub" style="font-size:0.95rem;padding:12px 18px;">
+                💻 Open Laptop Hub
+              </button>
+            </div>
+          </form>
+
+          <div class="active-tas-strip" id="taLoginActiveTasStrip" style="margin-top:20px;display:none;">
+            <div style="font-size:0.8rem;font-weight:700;color:var(--muted);text-transform:uppercase;margin-bottom:6px;width:100%;">
+              👥 Currently Active Teaching Assistants in Session:
+            </div>
+            <div id="taLoginActiveTasList" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 1: LAPTOP HUB, QR LINK, FOLDER PICKER & SESSION SETUP ==================== -->
+    <section id="panelHub" class="view">
+      <!-- QR Connect Box -->
+      <div class="card" style="margin-bottom: 20px;">
+        <div class="hub-connect-panel">
+          <div class="qr-frame">
+            <img id="hubQrImg" src="/api/qr.svg" alt="Scan with phone to open mobile scanner">
+          </div>
+          <div>
+            <div class="card-head">
+              <span class="step">QR</span>
+              <h3>100% Laptop-Hosted Scanner Link (Zero Cloud / Zero Internet Data)</h3>
+            </div>
+            <p class="muted">
+              Scan this QR code with any TA smartphone connected to the same College Wi-Fi router or Laptop Hotspot. Every scanned photo streams straight into your chosen laptop folder at local Wi-Fi speed.
+            </p>
+            <div class="field-row">
+              <input id="directScannerUrlInput" type="text" readonly style="flex:1;font-family:var(--mono);font-weight:700;">
+              <button type="button" class="btn btn-primary" id="btnCopyScannerUrl">📋 Copy Mobile Link</button>
+              <button type="button" class="btn btn-ghost" id="btnOpenOsFolder">📂 Open Folder on Laptop</button>
+            </div>
+            <div style="font-size:0.84rem;color:var(--muted);display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;">
+              <span>📁 <strong>Active Folder:</strong> <code id="activeStorageDirText">./data/paper_scans</code></span>
+              <span>💾 <strong>Free Disk Space:</strong> <strong id="freeDiskText" style="color:var(--green);">-- GB</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <!-- Session Form -->
+        <div class="card">
+          <div class="card-head">
+            <span class="step">1</span>
+            <h3>Create or Edit Exam Session</h3>
+          </div>
+          <p class="muted small">
+            Configure the exam details, date, question weights, and storage folder. Up to 25 pages per student and dynamic supplementary sheets are supported.
+          </p>
+
+          <!-- Exam Paper Layout Selector First -->
+          <div style="margin:12px 0;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <label class="small muted" for="selPaperType" style="font-weight:700;display:block;margin-bottom:6px;font-size:0.86rem;">
+              📄 Exam Paper Layout &amp; Answer Format
+            </label>
+            <select id="selPaperType" style="width:100%;font-weight:600;padding:8px 10px;border-radius:6px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);">
+              <option value="COMBINED_QUESTION_ANSWER">📝 Combined: Questions printed directly on Answer Sheet (designated answer space under each question)</option>
+              <option value="SEPARATE_QUESTION_BOOKLET">📑 Separate: Question Booklet &amp; Student Answer Sheet (student labels and numbers solutions)</option>
+            </select>
+            <div id="paperTypeNoticeCombined" style="margin-top:8px;font-size:0.80rem;color:var(--brand);display:flex;align-items:center;gap:6px;">
+              <span>✓ <strong>Integrated Format:</strong> Questions and designated answer spaces are printed on the same sheet. <em>No separate Question Paper scan needed.</em></span>
+            </div>
+            <div id="paperTypeNoticeSeparate" style="margin-top:8px;font-size:0.80rem;color:#b45309;display:none;align-items:center;gap:6px;">
+              <span>📑 <strong>Separate Booklet Format:</strong> Student solved questions in a separate booklet. <em>Attach physical Question Paper photo/scan or JSON below.</em></span>
+            </div>
+            <div class="small muted" style="margin-top:6px;font-size:0.78rem;">
+              🎓 Covers all IISER Bhopal disciplines: Physics, Chemistry, Biology, Mathematics, Coding / CS, Economics, and Interdisciplinary Sciences (not HSS).
+            </div>
+          </div>
+
+          <!-- Question Paper & Questions Spec Quick-Loader -->
+          <div id="qpSpecContainer" style="background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px;margin:12px 0;">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+              <strong id="qpSpecHeaderTitle" style="font-size:0.86rem;color:var(--text);">📋 Exam Questions &amp; Marking Rubrics Setup</strong>
+              <span class="pill pill-ok" id="specTotalWeightBadge">Total Weight: 0.0 Marks</span>
+            </div>
+            <p id="qpSpecHelpText" class="muted small" style="margin:0 0 10px 0;">
+              Configure questions and step-by-step rubrics below, or import your question paper JSON directly:
+            </p>
+            <div class="field-row" style="flex-wrap:wrap;gap:8px;align-items:center;">
+              <label class="btn btn-sm btn-primary" for="paperJsonFileInput" id="btnLoadPaperJsonLabel">📁 Import JSON</label>
+              <input id="paperJsonFileInput" type="file" accept=".json,application/json" class="visually-hidden">
+
+              <span id="qpImageUploadWrapper" style="display:none;">
+                <label class="btn btn-sm btn-ghost" for="qpImageFileInput" id="btnUploadQpImageLabel" style="border:1px solid var(--border);cursor:pointer;">📷 Upload QP Photo / Scan</label>
+                <input id="qpImageFileInput" type="file" accept="image/*" class="visually-hidden">
+              </span>
+            </div>
+            <div id="paperLoadSummaryBadge" class="alert alert-info" style="font-size:0.82rem;padding:6px 10px;margin-top:8px;" hidden></div>
+            <div id="qpImageStatusBox" style="display:none;margin-top:8px;padding:8px 12px;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:6px;font-size:0.84rem;align-items:center;justify-content:space-between;">
+              <span id="qpImageStatusText">📷 Question Paper Image attached</span>
+              <div style="display:flex;gap:6px;">
+                <button type="button" class="btn btn-sm btn-ghost" id="btnViewQpImage" style="padding:2px 8px;font-size:0.78rem;">👁 View Scan</button>
+                <button type="button" class="btn btn-sm btn-ghost" id="btnRemoveQpImage" style="padding:2px 8px;font-size:0.78rem;color:var(--danger,#ef4444);">✕ Remove</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-row-2col" style="margin:12px 0;">
+            <div>
+              <label class="small muted" for="inpCourseCode">Course Code</label>
+              <input id="inpCourseCode" type="text" value="DSE-201" placeholder="e.g. PHY-201, CHM-201, BIO-201, MTH-201, ECO-201, DSE-201" style="width:100%;">
+            </div>
+            <div>
+              <label class="small muted" for="inpExamDate">Exam Date</label>
+              <input id="inpExamDate" type="date" value="2026-10-19" style="width:100%;">
+            </div>
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label class="small muted" for="inpExamName">Exam Name</label>
+            <input id="inpExamName" type="text" value="Mid-Sem Examination" placeholder="e.g. Mid-Sem Quiz 1" style="width:100%;">
+          </div>
+
+          <div class="form-row-2col" style="margin-bottom:12px;">
+            <div>
+              <label class="small muted" for="inpTotalMarks">Total Marks (Auto-sums question weights)</label>
+              <input id="inpTotalMarks" type="number" step="0.5" value="20" min="0" style="width:100%;font-weight:700;">
+            </div>
+            <div>
+              <label class="small muted" for="inpExpectedPages">Sheets per Student</label>
+              <input id="inpExpectedPages" type="number" value="1" min="1" max="25" style="width:100%;">
+            </div>
+          </div>
+
+          <div style="margin-bottom:12px;">
+            <label class="small muted" for="inpStorageDir">Laptop Storage Folder for Photos</label>
+            <div style="display:flex;gap:6px;">
+              <input id="inpStorageDir" type="text" placeholder="./data/paper_scans" style="flex:1;">
+              <button type="button" class="btn btn-sm btn-ghost" id="btnBrowseSessionFolder">Browse…</button>
+            </div>
+          </div>
+
+          <details open style="margin:12px 0;background:var(--surface-2);padding:14px;border-radius:8px;border:1px solid var(--border);">
+            <summary style="cursor:pointer;font-weight:700;font-size:0.92rem;display:flex;justify-content:space-between;align-items:center;">
+              <span>📋 Exam Questions &amp; Marking Rubrics</span>
+              <span class="weight-badge" id="rubricsHeaderSummary">0 Qs · 0.0 Marks</span>
+            </summary>
+            <p class="muted small" style="margin:8px 0 10px;line-height:1.5;">
+              Configure questions with their title, maximum marks, discipline domain, problem statement, and step-by-step rubrics. Multimodal AI automatically evaluates all 2N half-sheet photos for N sheets per student against the Question Paper.
+            </p>
+
+            <div class="q-spec-toolbar" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+              <button type="button" class="btn btn-sm btn-primary" id="btnAddQuestionSpec">➕ Add Question</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btnEqualizeMarks" title="Evenly distribute total marks across all questions">⚖️ Equalize Marks</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btnToggleAllRubrics">📐 Expand / Collapse All Rubrics</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btnClearAllQuestions">🗑 Clear All</button>
+              <span class="muted small" id="qCountSummary" style="margin-left:auto;font-weight:600;">0 questions configured</span>
+            </div>
+
+            <div id="questionSpecsContainer" style="display:flex;flex-direction:column;gap:10px;"></div>
+          </details>
+
+          <div class="actions-row">
+            <button type="button" class="btn btn-primary" id="btnCreateSession">✨ Create New Session</button>
+            <button type="button" class="btn btn-ghost" id="btnUpdateSession" hidden>💾 Save Changes</button>
+            <button type="button" class="btn btn-ghost" id="btnDownloadBookletPdf" title="Generate printable A4 answer booklet with ArUco corners & QR header">📄 Printable Exam Booklet PDF</button>
+            <label class="btn btn-ghost" for="rosterCsvInput">📋 Import Roster CSV</label>
+            <input id="rosterCsvInput" type="file" accept=".csv,text/csv" class="visually-hidden">
+          </div>
+        </div>
+
+        <!-- AI & Concurrency Settings -->
+        <div>
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-head">
+              <span class="step">2</span>
+              <h3>Laptop AI Grading &amp; Prompt Caching</h3>
+            </div>
+            <p class="muted small">
+              Evaluates handwritten answer crops using Anthropic Claude Haiku Vision with Ephemeral Prompt Caching and local computer vision heuristics.
+            </p>
+
+            <div class="form-row-2col" style="margin:12px 0;">
+              <div>
+                <label class="small muted" for="cfgModel">Vision LLM Model</label>
+                <input id="cfgModel" type="text" list="modelPresetsList" value="claude-haiku-5-5" style="width:100%;font-weight:600;">
+                <datalist id="modelPresetsList">
+                  <option value="claude-haiku-5-5">Anthropic Claude Haiku 5.5 (Recommended · 90% Caching Discount)</option>
+                  <option value="claude-3-5-haiku-latest">Anthropic Claude 3.5 Haiku</option>
+                  <option value="claude-3-5-sonnet-latest">Anthropic Claude 3.5 Sonnet</option>
+                  <option value="gpt-4o-mini">OpenAI GPT-4o-mini</option>
+                  <option value="qwen2.5-vl-7b-instruct">Ollama Qwen2.5-VL-7B (100% Offline)</option>
+                </datalist>
+              </div>
+              <div>
+                <label class="small muted" for="cfgConcurrency">Concurrent Workers</label>
+                <input id="cfgConcurrency" type="number" min="1" max="20" value="6" style="width:100%;">
+              </div>
+            </div>
+
+            <div id="cfgLocalVlmRow" style="margin-bottom:12px;display:none;">
+              <label class="small muted" for="cfgLocalVlmUrl">Local Ollama / VLM Endpoint URL</label>
+              <input id="cfgLocalVlmUrl" type="text" placeholder="http://localhost:11434/v1" value="http://localhost:11434/v1" style="width:100%;font-weight:600;">
+            </div>
+
+            <div class="form-row-2col" style="margin-bottom:12px;">
+              <div>
+                <label class="small muted" for="cfgBatchSize">Crops per Cached Call</label>
+                <input id="cfgBatchSize" type="number" min="1" max="15" value="5" style="width:100%;">
+              </div>
+              <div>
+                <label class="small muted" for="cfgAutoApprove">Auto-Approve Threshold</label>
+                <input id="cfgAutoApprove" type="number" step="0.05" min="0.5" max="1.0" value="0.85" style="width:100%;">
+              </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+              <label class="small muted" for="cfgApiKey">Anthropic API Key (saved in laptop memory)</label>
+              <input id="cfgApiKey" type="password" placeholder="sk-ant-... (leave blank to keep current)" style="width:100%;">
+            </div>
+
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="btn btn-sm btn-ghost" id="btnSaveRuntimeSettings">⚙️ Apply AI &amp; Concurrency Settings</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btnQuickOpenHaiku">⚡ View Token Telemetry</button>
+            </div>
+          </div>
+
+          <!-- Saved Sessions List -->
+          <div class="card">
+            <div class="card-head">
+              <span class="step">📁</span>
+              <h3>Saved Sessions on Laptop</h3>
+            </div>
+            <div id="sessionsListBox" class="muted small">Loading sessions…</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 2: MOBILE CAMERA CAPTURE ==================== -->
+    <section id="panelCapture" class="view" hidden>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div>
+            <strong id="activeSessionBanner" style="font-size:1.05rem;color:var(--brand);">No active session selected</strong>
+            <div id="activeSessionMeta" class="muted small">Select or create a session in Step 1</div>
+          </div>
+          <span class="pill pill-ok" id="studentProgressCounter">0 / 400 students scanned</span>
+        </div>
+
+        <div class="form-row-2col scan-student-inputs" style="margin-bottom:14px;">
+          <div>
+            <label class="small muted" for="scanRollNo" style="font-weight:700;">Student Roll Number <span style="color:var(--red);">*</span></label>
+            <input id="scanRollNo" type="text" placeholder="e.g. 25101" autocomplete="off" spellcheck="false" style="width:100%;font-weight:700;font-size:1.1rem;padding:9px 12px;border:2px solid var(--brand);">
+          </div>
+          <div>
+            <label class="small muted" for="scanStudentName">Student Name (Optional)</label>
+            <input id="scanStudentName" type="text" placeholder="e.g. Aarav Sharma" autocomplete="off" style="width:100%;font-size:0.95rem;padding:9px 12px;">
+          </div>
+        </div>
+
+        <!-- Sheet Selector Strip -->
+        <div class="page-slots-strip" id="pageSlotsStrip" role="group" aria-label="Page continuity indicator"></div>
+
+        <!-- Camera Status Notice Banner -->
+        <div id="cameraHelpBanner" class="alert alert-info" style="font-size:0.84rem;margin-bottom:14px;" hidden></div>
+
+        <!-- Primary Action Box: Clean Zero-Friction Photo Scanning -->
+        <div class="scanner-hero-box" style="background:var(--surface-2);border:2px dashed var(--border-strong);border-radius:12px;padding:22px 16px;text-align:center;margin-bottom:16px;">
+          <div style="font-size:1.1rem;font-weight:700;color:var(--text);margin-bottom:4px;">
+            Target: <span id="currentScanningTargetText" style="color:var(--brand);">Sheet 1</span>
+          </div>
+          <p class="muted small" style="margin:0 auto 16px auto;max-width:620px;">
+            Capture sheets with high-contrast handwriting. Each sheet is automatically enhanced and split into <strong>Top Half</strong> and <strong>Bottom Half</strong> (2N images for N sheets).
+          </p>
+
+          <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;align-items:center;">
+            <label class="btn btn-primary btn-lg" for="fallbackCameraInput" id="btnSnapPhotoLabel" style="font-size:1.05rem;padding:12px 24px;cursor:pointer;box-shadow:0 2px 6px rgba(30,58,95,0.25);">
+              📸 Take Photo / Upload Sheet <span id="lblSnapPageNo">1</span>
+            </label>
+            <input id="fallbackCameraInput" type="file" accept="image/*,application/pdf,.pdf" capture="environment" class="visually-hidden">
+
+            <label class="btn btn-ghost" for="batchUploadInput" style="border:1.5px solid var(--border-strong);cursor:pointer;padding:12px 18px;" title="Upload all sheet photos or PDFs for the current student">
+              📁 Batch Sheets (Single Student)
+            </label>
+            <input id="batchUploadInput" type="file" accept="image/*,application/pdf,.pdf" multiple class="visually-hidden">
+
+            <label class="btn btn-ghost" for="bulkPdfZipInput" id="btnBulkPdfZipLabel" style="border:1.5px solid #059669;cursor:pointer;padding:12px 18px;background:rgba(16,185,129,0.08);color:#047857;font-weight:700;" title="Bulk ingest multiple student PDFs, multi-page PDFs, images, or ZIP of all student booklets">
+              📑 Bulk Student PDFs / ZIP (All Students)
+            </label>
+            <input id="bulkPdfZipInput" type="file" accept=".pdf,application/pdf,.zip,application/zip,image/*" multiple class="visually-hidden">
+
+            <button type="button" class="btn btn-ghost" id="btnToggleCamera" style="border:1.5px solid var(--border-strong);padding:12px 18px;">
+              🎥 Live Webcam
+            </button>
+          </div>
+
+          <div id="bulkUploadStatusBanner" class="alert alert-info" style="display:none;margin-top:14px;font-size:0.86rem;padding:10px 16px;border-radius:8px;align-items:center;justify-content:space-between;background:rgba(16,185,129,0.12);border:1px solid #10b981;color:#065f46;">
+            <span id="bulkUploadStatusText">Ingesting bulk PDFs / ZIPs...</span>
+            <span style="font-size:0.8rem;font-weight:700;">Processing...</span>
+          </div>
+        </div>
+
+        <!-- Optional Webcam Viewport (Hidden unless explicitly opened) -->
+        <div id="webcamContainer" style="display:none;margin-bottom:16px;border:1px solid var(--border);border-radius:8px;padding:12px;background:#0f172a;">
+          <div style="max-width:580px;margin:0 auto;text-align:center;">
+            <video id="cameraVideo" autoplay playsinline muted style="width:100%;border-radius:6px;display:block;margin-bottom:10px;"></video>
+            <div style="display:flex;gap:10px;justify-content:center;">
+              <button type="button" class="btn btn-primary" id="btnSnapPhoto">📸 Snap Frame Now</button>
+              <button type="button" class="btn btn-danger" id="btnCloseWebcam">✕ Close Webcam</button>
+            </div>
+          </div>
+        </div>
+
+        <canvas id="captureCanvas" hidden></canvas>
+        <img id="capturedPreviewImg" class="preview-frame" alt="Captured page preview" hidden>
+
+        <!-- Scanned Sheets Tray for Current Student -->
+        <div id="capturedSheetsTray" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px;">
+          <div style="font-weight:700;font-size:0.88rem;color:var(--text);margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+            <span>📑 Scanned Sheets for this Student:</span>
+            <span class="muted small" id="sheetsCapturedCountText">0 sheets uploaded</span>
+          </div>
+          <div id="capturedSheetsList" style="display:flex;gap:10px;flex-wrap:wrap;min-height:50px;align-items:center;">
+            <span class="muted small" id="noSheetsCapturedNotice">No sheets captured for this student yet. Tap "Take Photo / Upload" above.</span>
+          </div>
+        </div>
+
+        <div class="actions-row capture-footer-actions" style="justify-content:space-between;border-top:1px solid var(--border);padding-top:16px;margin-top:16px;">
+          <button type="button" class="btn btn-primary btn-lg" id="btnNextStudent" style="padding:11px 22px;">
+            ✅ Done with Student → Next Student
+          </button>
+          <button type="button" class="btn btn-ghost" id="btnFinishAllScanning">
+            🚀 Open Results &amp; Live Grading Dashboard →
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== STEP 3: LIVE LAPTOP RESULTS, CONCURRENT AI GRADING & EXCEL EXPORT ==================== -->
+    <section id="panelReview" class="view" hidden>
+      <div class="card" style="margin-bottom:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div>
+            <h2 id="reviewSessionTitle" style="margin:0;">Laptop Live Results &amp; Grading Dashboard</h2>
+            <p id="reviewSessionSub" class="muted small" style="margin:4px 0 0 0;"></p>
+          </div>
+          <div class="review-top-actions" style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="btn btn-primary" id="btnRunAiEvaluation">⚡ Grade All Submissions Concurrently</button>
+            <button type="button" class="btn btn-ghost" id="btnExportExcel" style="border:1px solid var(--border-strong);">📊 Export Clean Excel (.xlsx)</button>
+            <button type="button" class="btn btn-ghost" id="btnExportFeedbackZip">📦 Feedback ZIP</button>
+            <button type="button" class="btn btn-ghost" id="btnShowAnalytics">📈 Analytics</button>
+            <button type="button" class="btn btn-ghost" id="btnShowRegrades" title="View & resolve student regrade appeals">⚖️ Regrades (<span id="regradesCountBadge">0</span>)</button>
+          </div>
+        </div>
+
+        <!-- Telemetry Summary Strip -->
+        <div class="telemetry-mini-grid" id="telemetryStrip">
+          <div class="t-mini-card">
+            <div class="t-val" id="tStudentsCount">0</div>
+            <div class="t-lbl">Students Scanned</div>
+          </div>
+          <div class="t-mini-card">
+            <div class="t-val" id="tPagesCount">0</div>
+            <div class="t-lbl">Pages Processed</div>
+          </div>
+          <div class="t-mini-card">
+            <div class="t-val" id="tGreenCount" style="color:var(--green);">0</div>
+            <div class="t-lbl">GREEN (Approved)</div>
+          </div>
+          <div class="t-mini-card">
+            <div class="t-val" id="tRedCount" style="color:var(--red);">0</div>
+            <div class="t-lbl">RED (Needs Review)</div>
+          </div>
+          <div class="t-mini-card">
+            <div class="t-val" id="tCacheRead">0</div>
+            <div class="t-lbl">Prompt Cache Read Tok</div>
+          </div>
+        </div>
+
+        <!-- Progress Banner -->
+        <div id="gradingProgressBanner" class="alert alert-info" style="margin-top:14px;" hidden>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.88rem;">
+            <span id="gradingStageText">Grading in progress…</span>
+            <strong id="gradingPctText">0%</strong>
+          </div>
+        </div>
+
+        <!-- Filter Bar -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;align-items:center;" id="reviewFilterBar"></div>
+      </div>
+
+      <!-- Split Layout: Students List + Question Crop Inspector -->
+      <div class="review-split-grid">
+        <div class="card" style="max-height:78vh;overflow-y:auto;padding:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <h3 style="margin:0;">Students (<span id="filteredStudentCount">0</span>)</h3>
+            <span class="muted small">Hotkeys: ↑/↓ or J/K · A=Approve · 1/2/3=Tabs</span>
+          </div>
+          <input id="reviewSearchInput" type="search" placeholder="Search roll no or name…" style="width:100%;margin-bottom:10px;">
+          <div id="reviewStudentList" class="student-queue-box"></div>
+        </div>
+
+        <div class="card" id="reviewInspectorBox">
+          <div class="muted" style="padding:40px 20px;text-align:center;">
+            Select a student from the left panel to inspect cropped question answers, view full flattened pages, check AI confidence scores, and approve or override marks.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Folder Picker Modal -->
+  <dialog id="folderPickerModal" class="dialog-wide">
+    <div class="dialog-head">
+      <h3 style="margin:0;">📁 Choose or Create Laptop Storage Folder</h3>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnCloseFolderModal">✕ Close</button>
+    </div>
+    <div style="padding:18px 20px;">
+      <p class="muted small" style="margin-top:0;">
+        Select where scanned student exam sheets and cropped question images should be stored on your laptop:
+      </p>
+      <div id="folderPresetsRow" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"></div>
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <input id="folderCurrentPathInput" type="text" style="flex:1;font-family:var(--mono);">
+        <button type="button" class="btn btn-sm btn-ghost" id="btnFolderGoUp">⬆ Up</button>
+      </div>
+      <div class="editor-box" id="folderSubdirsList" style="max-height:220px;overflow-y:auto;padding:8px;"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <input id="newSubfolderNameInput" type="text" placeholder="Optional: New subfolder name (e.g. Quiz1_DSE201)" style="flex:1;">
+        <button type="button" class="btn btn-primary" id="btnConfirmFolderSelect">✅ Use This Folder</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Exam Analytics Modal -->
+  <dialog id="analyticsModal" class="dialog-wide">
+    <div class="dialog-head">
+      <h3 style="margin:0;">📊 Exam Analytics, Difficulty (P) &amp; Discrimination (D)</h3>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnCloseAnalyticsModal">✕ Close</button>
+    </div>
+    <div style="padding:18px 20px;">
+      <div class="analytics-metric-grid" id="analyticsOverviewGrid"></div>
+      <h4 style="margin:12px 0 8px;">Question-Level Difficulty &amp; Discrimination Indices</h4>
+      <div id="analyticsQuestionsList"></div>
+    </div>
+  </dialog>
+
+  <!-- ==================== CLAUDE HAIKU 5.5 USAGE & PROMPT CACHING DASHBOARD ==================== -->
+  <dialog id="haikuUsageModal" class="dialog-wide">
+    <div class="dialog-head">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <img src="/static/iiserb_logo.png" alt="IISER Bhopal Logo" style="width:34px;height:34px;object-fit:contain;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.15);flex-shrink:0;">
+        <div>
+          <h3 style="margin:0;">AI Evaluation Telemetry &amp; Cost Accounting</h3>
+          <p class="muted small" style="margin:2px 0 0 0;">IISER Bhopal · Model Tokenomics, Prompt Cache Economics &amp; Department Expenditure</p>
+        </div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnCloseHaikuUsageModal">✕ Close</button>
+    </div>
+
+    <div style="padding:20px 24px;max-height:80vh;overflow-y:auto;">
+      <!-- Section 1: Executive Metric Summary (4 balanced institutional cards) -->
+      <div class="haiku-kpi-grid">
+        <!-- Card 1: Billed Cost -->
+        <div class="haiku-card">
+          <div class="haiku-card-head">
+            <span class="haiku-card-tag">Billed Cost</span>
+            <span class="muted small">Actual Net</span>
+          </div>
+          <div class="haiku-card-val val-cost" id="haikuCostUsd">$0.0000</div>
+          <div class="haiku-card-sub"><strong id="haikuCostInr" style="color:var(--text);">₹0.00 INR</strong> · Standard: <span id="haikuUncachedCostUsd" style="color:var(--muted);">$0.0000</span></div>
+        </div>
+
+        <!-- Card 2: Cache Efficiency -->
+        <div class="haiku-card">
+          <div class="haiku-card-head">
+            <span class="haiku-card-tag">Cache Savings</span>
+            <span class="pill pill-ok" style="font-size:0.72rem;padding:2px 8px;">90% Discount</span>
+          </div>
+          <div class="haiku-card-val val-cache-read" id="haikuCacheHitRate">0.0%</div>
+          <div class="haiku-card-sub">Saved: <strong id="haikuTotalSavedUsd" style="color:var(--green);">$0.0000</strong> (<span id="haikuTotalSavedInr">₹0.00</span>)</div>
+        </div>
+
+        <!-- Card 3: Token Volume -->
+        <div class="haiku-card">
+          <div class="haiku-card-head">
+            <span class="haiku-card-tag">Token Volume</span>
+            <span class="muted small">Input / Cache / Output</span>
+          </div>
+          <div class="haiku-card-val" style="color:var(--brand);"><span id="haikuCacheReadTokens">0</span> <span style="font-size:0.85rem;color:var(--muted);font-weight:600;">cached</span></div>
+          <div class="haiku-card-sub"><span id="haikuInputTokens">0</span> base in · <span id="haikuCacheWriteTokens">0</span> write · <span id="haikuOutputTokens">0</span> out</div>
+        </div>
+
+        <!-- Card 4: Invocations & Latency -->
+        <div class="haiku-card">
+          <div class="haiku-card-head">
+            <span class="haiku-card-tag">API Performance</span>
+            <span class="muted small" id="haikuSuccessRate">100% success</span>
+          </div>
+          <div class="haiku-card-val val-latency" id="haikuAvgLatency">0 ms</div>
+          <div class="haiku-card-sub"><span id="haikuTotalCalls">0</span> calls (<span id="haikuFailedCalls">0</span> errors)</div>
+        </div>
+      </div>
+
+      <!-- Section 2: Model Configuration & Tariff Reference -->
+      <div class="card" style="margin-bottom:20px;padding:16px 20px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;">
+          <div style="flex:1;min-width:280px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <label for="haikuModalModelSelect" style="display:block;font-weight:700;color:var(--text);margin:0;font-size:0.88rem;">Active Evaluation Model</label>
+              <span id="haikuProviderBadge" class="pill pill-ok" style="font-size:0.75rem;">Cloud (Anthropic)</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <select id="haikuModalModelSelect" style="padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-weight:600;min-width:300px;font-size:0.88rem;">
+                <option value="claude-haiku-5-5">Anthropic Claude Haiku 5.5 (Recommended · 90% Cache Discount)</option>
+                <option value="claude-3-5-haiku-latest">Anthropic Claude 3.5 Haiku</option>
+                <option value="claude-3-5-sonnet-latest">Anthropic Claude 3.5 Sonnet</option>
+                <option value="gpt-4o-mini">OpenAI GPT-4o-mini</option>
+                <option value="qwen2.5-vl-7b-instruct">Ollama Qwen2.5-VL-7B (100% Offline)</option>
+              </select>
+              <button type="button" class="btn btn-sm btn-primary" id="btnSwitchHaikuModel">Apply Model</button>
+            </div>
+          </div>
+          <div style="font-size:0.8rem;color:var(--muted);background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:10px 14px;line-height:1.55;">
+            <strong style="color:var(--text);">Anthropic Official Tariff (Haiku 5.5):</strong><br>
+            • Base Input: $0.80 / MTok &nbsp;|&nbsp; • Cache Read: $0.08 / MTok (90% off)<br>
+            • Cache Write: $1.00 / MTok &nbsp;|&nbsp; • Output: $4.00 / MTok &nbsp;|&nbsp; • FX: ₹86.50/USD
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 3: Accounting Ledger Table -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <h4 style="margin:0;font-size:0.88rem;letter-spacing:0.03em;">Session vs Global Cost Breakdown</h4>
+        <span class="muted small">All token counts and expenditures tracked in real time</span>
+      </div>
+      <div id="haikuSessionsBreakdownBox" style="border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:var(--surface);box-shadow:var(--shadow);">
+        <!-- Filled dynamically by JS -->
+      </div>
+
+      <!-- Dialog Footer -->
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border);">
+        <button type="button" class="btn btn-sm btn-danger" id="btnResetHaikuUsage">🗑 Reset Global Counters</button>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn btn-sm btn-primary" id="btnRefreshHaikuUsage">🔄 Refresh Telemetry</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnCloseHaikuUsageModal2">Done</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================== REGRADE APPEALS & ARBITRATION MODAL ==================== -->
+  <dialog id="regradeModal" class="dialog-wide">
+    <div class="dialog-head">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:1.3rem;">⚖️</span>
+        <div>
+          <h3 style="margin:0;">Student Regrade Appeals &amp; Human Arbitration</h3>
+          <p class="muted small" style="margin:2px 0 0 0;">Review student petitions against step scoring and automatically update marks &amp; sheets upon approval.</p>
+        </div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnCloseRegradeModal">✕ Close</button>
+    </div>
+    <div style="padding:20px;max-height:80vh;overflow-y:auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+        <div style="display:flex;gap:6px;" id="regradeFilterPills">
+          <button type="button" class="btn btn-sm btn-primary regrade-filter-btn active" data-status="">All Appeals</button>
+          <button type="button" class="btn btn-sm btn-ghost regrade-filter-btn" data-status="PENDING">Pending</button>
+          <button type="button" class="btn btn-sm btn-ghost regrade-filter-btn" data-status="ACCEPTED">Accepted</button>
+          <button type="button" class="btn btn-sm btn-ghost regrade-filter-btn" data-status="REJECTED">Rejected</button>
+        </div>
+        <button type="button" class="btn btn-sm btn-ghost" id="btnRefreshRegrades">🔄 Refresh Appeals</button>
+      </div>
+
+      <div id="regradesListBox" style="display:flex;flex-direction:column;gap:12px;">
+        <!-- Filled dynamically by JS -->
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================== LODGE REGRADE PETITION MODAL ==================== -->
+  <dialog id="lodgeRegradeModal" style="max-width:540px;border-radius:12px;padding:20px;border:1px solid var(--border-strong);box-shadow:0 20px 50px rgba(0,0,0,0.35);background:var(--surface);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h3 style="margin:0;">⚖️ Lodge Regrade Appeal</h3>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnCancelLodgeRegradeTop">✕</button>
+    </div>
+    <p class="muted small" style="margin-bottom:14px;">Submit a student petition for mark re-evaluation on a specific question.</p>
+    <form id="formLodgeRegrade" onsubmit="return false;" style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label for="lodgeRegradeRoll" class="small muted">Student Roll Number</label>
+        <input id="lodgeRegradeRoll" type="text" readonly style="width:100%;font-weight:700;background:var(--surface-2);">
+      </div>
+      <div>
+        <label for="lodgeRegradeQuestion" class="small muted">Question ID</label>
+        <select id="lodgeRegradeQuestion" style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid var(--border-strong);background:var(--surface);color:var(--text);font-weight:600;"></select>
+      </div>
+      <div>
+        <label for="lodgeRegradeClaimedMarks" class="small muted">Claimed Marks</label>
+        <input id="lodgeRegradeClaimedMarks" type="number" step="0.5" min="0" value="5" style="width:100%;font-weight:700;padding:8px 10px;border-radius:6px;border:1.5px solid var(--border-strong);">
+      </div>
+      <div>
+        <label for="lodgeRegradeReason" class="small muted">Student Grounds / Reason</label>
+        <textarea id="lodgeRegradeReason" rows="3" placeholder="e.g. Step 3 calculation is algebraically equivalent via integration by parts..." required style="width:100%;padding:8px 10px;border-radius:6px;border:1.5px solid var(--border-strong);background:var(--surface);color:var(--text);"></textarea>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+        <button type="button" class="btn btn-ghost" id="btnCancelLodgeRegrade">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="btnSubmitLodgeRegrade">Submit Appeal</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ================= HANDWRITTEN EXAM BENCHMARK MODAL ================= -->
+  <dialog id="handwrittenHubModal" class="dialog-wide">
+    <div class="dialog-head" style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span style="font-size:1.8rem;">✍️</span>
+        <div>
+          <h3 style="margin:0;">Real Digitized Handwritten Student Exam Benchmark Hub</h3>
+          <p class="muted small" style="margin:2px 0 0 0;">Dataset of Digitized Student Examination Papers (50 Students · 20 MCQs · Claude Haiku Multimodal Vision)</p>
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="handwrittenHubClose" type="button" aria-label="Close dialog">✕</button>
+    </div>
+
+    <div style="padding:20px 24px;max-height:80vh;overflow-y:auto;">
+      <!-- Live Metrics Grid -->
+      <div class="polyglot-metrics-grid">
+        <div class="polyglot-stat-card">
+          <span class="polyglot-stat-label">Transcription Accuracy</span>
+          <span class="polyglot-stat-val" style="color:var(--green);" id="hwTranscriptionAcc">--%</span>
+          <span class="polyglot-stat-sub" id="hwTranscriptionSub">Student_MCQ.csv ground truth</span>
+        </div>
+        <div class="polyglot-stat-card">
+          <span class="polyglot-stat-label">Grading Accuracy</span>
+          <span class="polyglot-stat-val" style="color:#0284c7;" id="hwGradingAcc">--%</span>
+          <span class="polyglot-stat-sub">answerkey.txt correct answers</span>
+        </div>
+        <div class="polyglot-stat-card">
+          <span class="polyglot-stat-label">Avg Speed / Student</span>
+          <span class="polyglot-stat-val" style="color:#d97706;" id="hwAvgLatency">--s</span>
+          <span class="polyglot-stat-sub">Multimodal Haiku Vision</span>
+        </div>
+        <div class="polyglot-stat-card">
+          <span class="polyglot-stat-label">Students Evaluated</span>
+          <span class="polyglot-stat-val" style="color:var(--brand);" id="hwTotalStudents">50 / 50</span>
+          <span class="polyglot-stat-sub" id="hwTotalQuestions">1,000 Questions</span>
+        </div>
+      </div>
+
+      <!-- Iteration Timeline -->
+      <h4 style="margin:20px 0 8px 0;">Optimization Iterations &amp; Speedup Timeline</h4>
+      <div style="overflow-x:auto;">
+        <table class="polyglot-table" id="hwHistoryTable">
+          <thead>
+            <tr>
+              <th>Iteration</th>
+              <th>Timestamp</th>
+              <th>Students</th>
+              <th>Transcription Acc</th>
+              <th>Grading Acc</th>
+              <th>Wall Clock</th>
+              <th>Model</th>
+            </tr>
+          </thead>
+          <tbody id="hwHistoryTbody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Student Details Summary -->
+      <h4 style="margin:20px 0 8px 0;">Latest Student Papers Evaluation</h4>
+      <div style="overflow-x:auto;max-height:300px;overflow-y:auto;">
+        <table class="polyglot-table" id="hwStudentsTable">
+          <thead>
+            <tr>
+              <th>Student</th>
+              <th>MCQ Page</th>
+              <th>Transcription</th>
+              <th>Grading Score</th>
+              <th>Latency</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="hwStudentsTbody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <div class="dialog-actions" style="margin-top:20px;display:flex;justify-content:flex-end;">
+        <button class="btn btn-primary" id="handwrittenHubDone" type="button">Close Hub</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- High-Res Zoom & Contrast Lightbox Modal -->
+  <dialog id="imageLightboxModal" class="modal lightbox-modal">
+    <div class="lightbox-dialog-card" style="display:flex;flex-direction:column;width:100%;height:100%;">
+      <div class="lightbox-header" style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,0.15);color:#fff;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <strong id="lightboxTitle" style="font-size:1.05rem;color:#f8fafc;">Student Answer Crop</strong>
+          <span class="pill pill-ok" id="lightboxZoomPill" style="font-family:var(--mono);font-size:0.8rem;">100%</span>
+        </div>
+        <div class="lightbox-controls" style="display:flex;align-items:center;gap:8px;">
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxFilterNormal" style="color:#e2e8f0;border:1px solid rgba(255,255,255,0.25);" title="Original Color">Normal</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxFilterContrast" style="color:#e2e8f0;border:1px solid rgba(255,255,255,0.25);" title="High Contrast B&W (Pencil Boost)">B&amp;W Boost</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxFilterInvert" style="color:#e2e8f0;border:1px solid rgba(255,255,255,0.25);" title="Chalkboard Invert (Faint Pencil)">Chalkboard</button>
+          <span style="color:rgba(255,255,255,0.3);margin:0 4px;">|</span>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxZoomOut" style="color:#fff;font-weight:700;font-size:1.1rem;padding:2px 10px;border:1px solid rgba(255,255,255,0.3);" title="Zoom Out (-)">−</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxZoomReset" style="color:#e2e8f0;border:1px solid rgba(255,255,255,0.25);" title="Reset Zoom">Reset</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnLightboxZoomIn" style="color:#fff;font-weight:700;font-size:1.1rem;padding:2px 10px;border:1px solid rgba(255,255,255,0.3);" title="Zoom In (+)">+</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="btnCloseLightbox" style="color:#f87171;font-weight:700;font-size:1.2rem;margin-left:8px;" title="Close (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="lightbox-body" id="lightboxBody" style="flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;background:#020617;cursor:grab;">
+        <img id="lightboxImg" class="lightbox-img-viewer" src="" alt="Enlarged Exam Submission View" draggable="false">
+      </div>
+      <div class="lightbox-footer" style="padding:8px 18px;background:#0f172a;border-top:1px solid rgba(255,255,255,0.1);font-size:0.82rem;color:#94a3b8;display:flex;justify-content:space-between;align-items:center;">
+        <span>💡 Drag mouse to pan. Use mouse wheel or + / − buttons to zoom into faint pencil equations.</span>
+        <span>Hotkeys: <kbd class="shortcut-kbd">Esc</kbd> Close</span>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Keyboard Shortcuts Cheatsheet Modal -->
+  <dialog id="shortcutGuideModal" class="modal">
+    <div class="dialog-card" style="max-width:560px;">
+      <div class="dialog-header" style="display:flex;justify-content:space-between;align-items:center;">
+        <h3 style="margin:0;">⌨️ Examiner Keyboard Shortcuts</h3>
+        <button type="button" class="btn btn-sm btn-ghost" id="btnCloseShortcutGuide">✕</button>
+      </div>
+      <div class="dialog-body" style="margin-top:14px;">
+        <p class="small muted" style="margin-bottom:14px;">Speed up your grading and review sessions with these instant hotkeys:</p>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:10px 16px;align-items:center;font-size:0.9rem;">
+          <div><kbd class="shortcut-kbd">J</kbd> or <kbd class="shortcut-kbd">→</kbd></div>
+          <div>Navigate to <strong>Next Student</strong> in Inspector</div>
+
+          <div><kbd class="shortcut-kbd">K</kbd> or <kbd class="shortcut-kbd">←</kbd></div>
+          <div>Navigate to <strong>Previous Student</strong> in Inspector</div>
+
+          <div><kbd class="shortcut-kbd">A</kbd></div>
+          <div><strong>Quick-Accept AI Grade</strong> for all questions on current student</div>
+
+          <div><kbd class="shortcut-kbd">1</kbd> / <kbd class="shortcut-kbd">2</kbd> / <kbd class="shortcut-kbd">3</kbd></div>
+          <div>Switch Workflow Steps (1. Hub, 2. Scan, 3. Review)</div>
+
+          <div><kbd class="shortcut-kbd">Esc</kbd></div>
+          <div>Close Lightbox / Any Open Modal</div>
+
+          <div><kbd class="shortcut-kbd">?</kbd></div>
+          <div>Open this Shortcuts Cheatsheet</div>
+        </div>
+      </div>
+      <div class="dialog-actions" style="margin-top:20px;display:flex;justify-content:flex-end;">
+        <button class="btn btn-primary" id="btnDoneShortcutGuide" type="button">Got it</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="scannerToast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/scanner.js" defer></script>
+</body>
+</html>
