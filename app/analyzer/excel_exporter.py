@@ -129,7 +129,7 @@ def build_session_excel_bytes(session_data: Dict[str, Any]) -> bytes:
         for q in questions:
             qid = str(q.get("question_id", "Q1"))
             q_max = float(q.get("max_marks", 5.0))
-            ev = evals.get(qid)
+            ev = evals.get(qid) or evals.get(qid.upper()) or evals.get(qid.lower())
             if ev:
                 final_m = float(ev.get("final_marks", ev.get("ai_awarded_marks", 0.0)) or 0.0)
                 q_marks_list.append(round(final_m, 2))

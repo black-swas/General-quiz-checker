@@ -1311,15 +1311,12 @@
     // Render Scanned Sheets Tray for Current Student
     const trayBox = $('capturedSheetsList');
     const countBadge = $('sheetsCapturedCountText');
-    const noSheetsNotice = $('noSheetsCapturedNotice');
     if (trayBox) {
       const pList = (stRecord ? stRecord.pages || [] : []);
       if (countBadge) countBadge.textContent = `${pList.length} sheet(s) uploaded (${pList.length * 2} half images)`;
       if (!pList.length) {
-        if (noSheetsNotice) noSheetsNotice.hidden = false;
-        trayBox.replaceChildren(noSheetsNotice || h('span', { class: 'muted small', text: 'No sheets captured for this student yet. Tap Take Photo / Upload above.' }));
+        trayBox.replaceChildren(h('span', { class: 'muted small', id: 'noSheetsCapturedNotice', text: 'No sheets captured for this student yet. Tap "Take Photo / Upload" above.' }));
       } else {
-        if (noSheetsNotice) noSheetsNotice.hidden = true;
         trayBox.replaceChildren(...pList.map((p) => {
           const isExtra = p.page_no > expPages;
           const sheetLabel = isExtra ? `Extra #${p.page_no - expPages} (Page ${p.page_no})` : `Sheet ${p.page_no}`;

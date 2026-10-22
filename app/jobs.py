@@ -91,7 +91,7 @@ class JobStore:
                     continue
                 q_evals = (job.result.get("evaluations_by_question") or {}).get(req.question_id) or []
                 for ev in q_evals:
-                    if ev.get("roll_no") == req.roll_no:
+                    if str(ev.get("roll_no", "")).strip().casefold() == str(req.roll_no).strip().casefold():
                         ev["ta_feedback"] = req.ta_decision
                         ev["ta_override_category"] = req.override_category
                         ev["ta_note"] = req.ta_explanation

@@ -1717,38 +1717,39 @@ async def evaluate_session_whole_pages(
             if not candidate_models:
                 candidate_models = [settings.fallback_model]
 
-            for model in candidate_models:
-                if report["fatal"]:
-                    break
-                payload = {
-                    "model": model,
-                    "max_tokens": min(4096, 250 * len(batch) * max(1, len(questions)) + 300),
-                    "system": [
-                        {
-                            "type": "text",
-                            "text": system_prompt,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    "messages": [{"role": "user", "content": content_blocks}],
-                    "tools": [VISION_TOOL_SCHEMA],
-                    "tool_choice": {"type": "tool", "name": VISION_TOOL_NAME},
-                }
-                data, _status = await _post(client, payload, headers, report)
-                if data is not None:
-                    usage = data.get("usage") or {}
-                    report["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
-                    report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
-                    report["cache_read_input_tokens"] += int(usage.get("cache_read_input_tokens", 0) or 0)
-                    report["cache_creation_input_tokens"] += int(usage.get("cache_creation_input_tokens", 0) or 0)
-                    extracted = extract_reviews(data, expected_tool=VISION_TOOL_NAME)
-                    reviews_list.extend(extracted)
-                    if extracted:
-                        report["ok_calls"] += 1
-                        used_m = str(data.get("model") or model)
-                        if used_m not in report["models_used"]:
-                            report["models_used"].append(used_m)
+            if settings.llm_available:
+                for model in candidate_models:
+                    if report["fatal"]:
                         break
+                    payload = {
+                        "model": model,
+                        "max_tokens": min(4096, 250 * len(batch) * max(1, len(questions)) + 300),
+                        "system": [
+                            {
+                                "type": "text",
+                                "text": system_prompt,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                        "messages": [{"role": "user", "content": content_blocks}],
+                        "tools": [VISION_TOOL_SCHEMA],
+                        "tool_choice": {"type": "tool", "name": VISION_TOOL_NAME},
+                    }
+                    data, _status = await _post(client, payload, headers, report)
+                    if data is not None:
+                        usage = data.get("usage") or {}
+                        report["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+                        report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+                        report["cache_read_input_tokens"] += int(usage.get("cache_read_input_tokens", 0) or 0)
+                        report["cache_creation_input_tokens"] += int(usage.get("cache_creation_input_tokens", 0) or 0)
+                        extracted = extract_reviews(data, expected_tool=VISION_TOOL_NAME)
+                        reviews_list.extend(extracted)
+                        if extracted:
+                            report["ok_calls"] += 1
+                            used_m = str(data.get("model") or model)
+                            if used_m not in report["models_used"]:
+                                report["models_used"].append(used_m)
+                            break
 
             # Map reviews by (roll_no.casefold(), question_id.upper())
             revs_by_roll_q: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -1886,9 +1887,10 @@ async def evaluate_session_whole_pages(
 
     limits = httpx.Limits(max_keepalive_connections=25, max_connections=50, keepalive_expiry=30.0)
     async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds, limits=limits) as client:
-        await _process_whole_page_batch(client, batches[0])
-        if len(batches) > 1:
-            await asyncio.gather(*(_process_whole_page_batch(client, b) for b in batches[1:]))
+        if batches:
+            await _process_whole_page_batch(client, batches[0])
+            if len(batches) > 1:
+                await asyncio.gather(*(_process_whole_page_batch(client, b) for b in batches[1:]))
 
     return report
 

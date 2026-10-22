@@ -121,7 +121,7 @@ def generate_student_feedback_pdf(
     for q in questions:
         qid = q.get("question_id", "Q")
         max_m = float(q.get("max_marks", 5.0))
-        ev = evals.get(qid, {})
+        ev = evals.get(qid) or evals.get(str(qid).upper()) or evals.get(str(qid).lower()) or {}
         awarded = float(ev.get("final_marks", ev.get("ai_awarded_marks", 0.0)) or 0.0)
         status = ev.get("ta_status", "PENDING")
         tab = ev.get("verdict_tab", "GRAY")
@@ -209,7 +209,7 @@ def generate_student_feedback_pdf(
 
         for q in page_qs:
             qid = q.get("question_id", "Q")
-            ev = evals.get(qid, {})
+            ev = evals.get(qid) or evals.get(str(qid).upper()) or evals.get(str(qid).lower()) or {}
             x0_pct = float(q.get("x_start_pct", 0.0)) / 100.0
             x1_pct = float(q.get("x_end_pct", 100.0)) / 100.0
             y0_pct = float(q.get("y_start_pct", 10.0)) / 100.0

@@ -1343,8 +1343,9 @@ async def api_rotate_student_page(
 
     cv_info = await asyncio.to_thread(process_and_save_page, raw_path, proc_path)
 
+    actual_roll = rec.get("roll_no") or roll_no
     safe_sid = _safe_segment(session_id)
-    safe_roll = _safe_segment(roll_no)
+    safe_roll = _safe_segment(actual_roll)
     crops_dir = _session_storage_root(session) / safe_sid / safe_roll / "crops"
     questions_on_page = [q for q in (session.get("questions") or []) if int(q.get("page_number", 1)) == int(page_no)]
     if not questions_on_page and int(page_no) == 1:
@@ -1399,7 +1400,16 @@ def api_get_question_crop_image(
         raise HTTPException(404, "Session not found.")
     safe_sid = _safe_segment(session_id)
     safe_roll = _safe_segment(roll_no)
-    crop_path = _session_storage_root(session) / safe_sid / safe_roll / "crops" / f"{_safe_segment(question_id)}.jpg"
+    crops_dir = _session_storage_root(session) / safe_sid / safe_roll / "crops"
+    crop_path = crops_dir / f"{_safe_segment(question_id)}.jpg"
+    if not crop_path.is_file():
+        # Check case-insensitive question id match in crops directory
+        if crops_dir.is_dir():
+            target_q = question_id.strip().casefold()
+            for cf in crops_dir.glob("*.jpg"):
+                if cf.stem.casefold() == target_q:
+                    crop_path = cf
+                    break
     if not crop_path.is_file():
         # Fall back to processed full page 1 or raw page 1 for single-page exams
         p1 = _session_storage_root(session) / safe_sid / safe_roll / "processed" / "page_1_flattened.jpg"
@@ -1681,7 +1691,8 @@ async def _run_session_async_grading(
                 for k in ("calls", "ok_calls", "submissions_reviewed", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
                     telemetry[k] = telemetry.get(k, 0) + int(q_report.get(k, 0) or 0)
 
-        all_session_questions = session.get("questions") or []
+        fresh_session = get_exam_session(session_id) or session
+        all_session_questions = fresh_session.get("questions") or []
         for s in students:
             s_roll = s["roll_no"]
             evs = get_student_question_evaluations(session_id, s_roll)
@@ -1712,7 +1723,7 @@ async def _run_session_async_grading(
             logger.warning("Could not persist global LLM usage: %s", _t_err)
 
         if only_roll_no:
-            all_st = session.get("students") or []
+            all_st = fresh_session.get("students") or []
             total_q = len(all_session_questions)
             graded_count = sum(
                 1 for st_item in all_st
@@ -1776,7 +1787,7 @@ async def api_finalize_student(
         record_active_ta(session_id, req.ta_name)
 
     # Audit student's scanned pages & verify packet consistency
-    st_pages = [p for p in (session.get("scanned_pages") or []) if p.get("roll_no") == req.roll_no]
+    st_pages = [p for p in (session.get("scanned_pages") or []) if str(p.get("roll_no", "")).strip().casefold() == req.roll_no.strip().casefold()]
     expected_page_count = int(session.get("expected_pages") or len(st_pages) or 1)
     _, missing_pages, audit_warnings = reorder_and_audit_scanned_pages(st_pages, expected_page_count)
     is_consistent, consistency_warnings = verify_packet_student_consistency(st_pages, req.roll_no)
@@ -2060,7 +2071,7 @@ def api_student_feedback_pdf(
     session = get_exam_session(session_id)
     if not session:
         raise HTTPException(404, f"Session '{session_id}' not found.")
-    st = next((s for s in session.get("students", []) if s.get("roll_no") == roll_no), None)
+    st = next((s for s in session.get("students", []) if str(s.get("roll_no", "")).strip().casefold() == roll_no.strip().casefold()), None)
     if not st:
         raise HTTPException(404, f"Student '{roll_no}' not found in session.")
     pdf_bytes = generate_student_feedback_pdf(session, st)

@@ -610,6 +610,9 @@ def get_exam_session(session_id: str) -> Optional[Dict[str, Any]]:
         p["image_url"] = f"/api/sessions/{session_id}/students/{p['roll_no']}/pages/{p['page_no']}/image"
         p["supplementary"] = format_supplementary_page_info(p["page_no"], int(r["expected_pages"] or 4))
         pages_by_student.setdefault(p["roll_no"], []).append(p)
+        clean_p_roll = str(p["roll_no"]).strip().casefold()
+        if clean_p_roll != p["roll_no"]:
+            pages_by_student.setdefault(clean_p_roll, []).append(p)
 
     evals_by_student: Dict[str, Dict[str, Any]] = {}
     summary_counts = {"GREEN": 0, "BLUE": 0, "RED": 0, "GRAY": 0, "AUTO_APPROVED": 0, "TA_REVIEWED": 0}
@@ -633,6 +636,9 @@ def get_exam_session(session_id: str) -> Optional[Dict[str, Any]]:
         if e.get("ta_status") in ("TA_APPROVED", "TA_OVERRIDDEN"):
             summary_counts["TA_REVIEWED"] += 1
         evals_by_student.setdefault(e["roll_no"], {})[e["question_id"]] = e
+        clean_e_roll = str(e["roll_no"]).strip().casefold()
+        if clean_e_roll != e["roll_no"]:
+            evals_by_student.setdefault(clean_e_roll, {})[e["question_id"]] = e
 
     # Autonomously merge any questions discovered dynamically by AI into questions list
     known_q_ids = {str(q.get("question_id", "")).upper() for q in questions if isinstance(q, dict)}
@@ -650,9 +656,28 @@ def get_exam_session(session_id: str) -> Optional[Dict[str, Any]]:
                 "reference_solution": "",
             })
 
+    # Ensure any student present in scanned_pages or evals is included in student list
+    known_student_rolls = {str(s.get("roll_no", "")).strip().casefold() for s in students}
+    for p in pages:
+        p_roll = str(p.get("roll_no", "")).strip()
+        if p_roll and p_roll.casefold() not in known_student_rolls:
+            known_student_rolls.add(p_roll.casefold())
+            students.append({
+                "session_id": session_id,
+                "roll_no": p_roll,
+                "student_name": "",
+                "pages_uploaded": 0,
+                "finalized": 0,
+                "grading_status": "PENDING",
+                "claimed_by": "",
+                "claimed_at": "",
+                "created_at": p.get("uploaded_at", ist_now()),
+                "updated_at": p.get("uploaded_at", ist_now()),
+            })
+
     for s in students:
         roll = s["roll_no"]
-        raw_st_pages = pages_by_student.get(roll, [])
+        raw_st_pages = pages_by_student.get(roll) or pages_by_student.get(roll.strip().casefold()) or []
         ordered_pages, missing_pages, audit_warnings = reorder_and_audit_scanned_pages(
             raw_st_pages, int(r["expected_pages"] or 4)
         )
@@ -660,7 +685,7 @@ def get_exam_session(session_id: str) -> Optional[Dict[str, Any]]:
         s["missing_pages"] = missing_pages
         s["audit_warnings"] = audit_warnings
         s["pages_uploaded"] = len(ordered_pages)
-        st_evals = evals_by_student.get(roll, {})
+        st_evals = evals_by_student.get(roll) or evals_by_student.get(roll.strip().casefold()) or {}
         s["evaluations"] = st_evals
         s["total_awarded_marks"] = round(sum(float(ev.get("final_marks", 0.0) or 0.0) for ev in st_evals.values()), 2)
         has_stored_marks = ("total_marks" in r.keys() and r["total_marks"] is not None and float(r["total_marks"]) > 0)
@@ -744,9 +769,9 @@ def delete_session_student(session_id: str, roll_no: str) -> bool:
     with _LOCK:
         conn = _connect()
         try:
-            conn.execute("DELETE FROM question_evaluations WHERE session_id=? AND roll_no=?", (session_id, clean_roll))
-            conn.execute("DELETE FROM scanned_pages WHERE session_id=? AND roll_no=?", (session_id, clean_roll))
-            cur = conn.execute("DELETE FROM session_students WHERE session_id=? AND roll_no=?", (session_id, clean_roll))
+            conn.execute("DELETE FROM question_evaluations WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
+            conn.execute("DELETE FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
+            cur = conn.execute("DELETE FROM session_students WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
             conn.execute("UPDATE exam_sessions SET updated_at=? WHERE session_id=?", (now, session_id))
             conn.commit()
             return cur.rowcount > 0
@@ -763,12 +788,17 @@ def delete_scanned_page_record(session_id: str, roll_no: str, page_no: int) -> b
         conn = _connect()
         try:
             cur = conn.execute("DELETE FROM scanned_pages WHERE page_id=?", (page_id,))
+            if cur.rowcount == 0:
+                cur = conn.execute(
+                    "DELETE FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE AND page_no=?",
+                    (session_id, clean_roll, int(page_no)),
+                )
             pg_count = conn.execute(
-                "SELECT COUNT(*) FROM scanned_pages WHERE session_id=? AND roll_no=?", (session_id, clean_roll)
+                "SELECT COUNT(*) FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll)
             ).fetchone()[0]
             conn.execute(
-                "UPDATE session_students SET pages_uploaded=?, updated_at=? WHERE session_id=? AND roll_no=?",
-                (pg_count, now, session_id, clean_roll),
+                "UPDATE session_students SET pages_uploaded=?, updated_at=? WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)",
+                (pg_count, now, session_id, clean_roll, clean_roll),
             )
             conn.execute("UPDATE exam_sessions SET updated_at=? WHERE session_id=?", (now, session_id))
             conn.commit()
@@ -808,12 +838,18 @@ def save_scanned_page_record(
                  round(float(blur_score), 2), int(bool(is_sharp)), retake_count, int(file_size_bytes), sha256, now),
             )
             pg_count = conn.execute(
-                "SELECT COUNT(*) FROM scanned_pages WHERE session_id=? AND roll_no=?", (session_id, clean_roll)
+                "SELECT COUNT(*) FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll)
             ).fetchone()[0]
-            conn.execute(
-                "UPDATE session_students SET pages_uploaded=?, updated_at=? WHERE session_id=? AND roll_no=?",
-                (pg_count, now, session_id, clean_roll),
+            up_cur = conn.execute(
+                "UPDATE session_students SET pages_uploaded=?, updated_at=? WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)",
+                (pg_count, now, session_id, clean_roll, clean_roll),
             )
+            if up_cur.rowcount == 0:
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_students (session_id, roll_no, student_name, pages_uploaded, finalized, grading_status, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (session_id, clean_roll, "", pg_count, 0, "PENDING", now, now),
+                )
             conn.execute("UPDATE exam_sessions SET updated_at=? WHERE session_id=?", (now, session_id))
             conn.commit()
             row = conn.execute("SELECT * FROM scanned_pages WHERE page_id=?", (page_id,)).fetchone()
@@ -829,6 +865,11 @@ def get_scanned_page_record(session_id: str, roll_no: str, page_no: int) -> Opti
         conn = _connect()
         try:
             row = conn.execute("SELECT * FROM scanned_pages WHERE page_id=?", (page_id,)).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT * FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE AND page_no=?",
+                    (session_id, roll_no.strip(), int(page_no)),
+                ).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()
@@ -865,6 +906,11 @@ def save_question_evaluation(
                 "SELECT ta_status, ta_final_marks, ta_comment FROM question_evaluations WHERE eval_id=?",
                 (eval_id,)
             ).fetchone()
+            if not existing:
+                existing = conn.execute(
+                    "SELECT ta_status, ta_final_marks, ta_comment FROM question_evaluations WHERE session_id=? AND roll_no=? COLLATE NOCASE AND question_id=? COLLATE NOCASE",
+                    (session_id, clean_roll, question_id)
+                ).fetchone()
             if existing and existing["ta_status"] in ("TA_APPROVED", "TA_OVERRIDDEN"):
                 ta_status = existing["ta_status"]
                 ta_final_marks = existing["ta_final_marks"]
@@ -912,6 +958,17 @@ def apply_ta_grade_override(
         try:
             row = conn.execute("SELECT * FROM question_evaluations WHERE eval_id=?", (eval_id,)).fetchone()
             if not row:
+                row = conn.execute(
+                    """
+                    SELECT * FROM question_evaluations
+                    WHERE session_id=? AND roll_no=? COLLATE NOCASE AND (question_id=? OR question_id=? COLLATE NOCASE)
+                    LIMIT 1
+                    """,
+                    (session_id, roll_no.strip(), question_id, question_id),
+                ).fetchone()
+                if row:
+                    eval_id = row["eval_id"]
+            if not row:
                 return None
             conn.execute(
                 """
@@ -950,12 +1007,13 @@ def bulk_approve_session_green(session_id: str) -> int:
 
 def get_student_question_evaluations(session_id: str, roll_no: str) -> List[Dict[str, Any]]:
     init_hitl_db()
+    clean_roll = roll_no.strip()
     with _LOCK:
         conn = _connect()
         try:
             rows = conn.execute(
-                "SELECT * FROM question_evaluations WHERE session_id=? AND roll_no=?",
-                (session_id, roll_no),
+                "SELECT * FROM question_evaluations WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)",
+                (session_id, clean_roll, clean_roll),
             ).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -1241,18 +1299,19 @@ def claim_next_student(
 def release_student_claim(session_id: str, roll_no: str, ta_id: str) -> bool:
     """Releases a student claim held by ta_id (or unconditionally if ta_id == 'force')."""
     init_hitl_db()
+    clean_roll = roll_no.strip()
     with _LOCK:
         conn = _connect()
         try:
             if ta_id == "force":
                 cur = conn.execute(
-                    "UPDATE session_students SET claimed_by = '', claimed_at = '' WHERE session_id = ? AND roll_no = ?",
-                    (session_id, roll_no),
+                    "UPDATE session_students SET claimed_by = '', claimed_at = '' WHERE session_id = ? AND (roll_no = ? OR roll_no = ? COLLATE NOCASE)",
+                    (session_id, clean_roll, clean_roll),
                 )
             else:
                 cur = conn.execute(
-                    "UPDATE session_students SET claimed_by = '', claimed_at = '' WHERE session_id = ? AND roll_no = ? AND claimed_by = ?",
-                    (session_id, roll_no, ta_id),
+                    "UPDATE session_students SET claimed_by = '', claimed_at = '' WHERE session_id = ? AND (roll_no = ? OR roll_no = ? COLLATE NOCASE) AND claimed_by = ?",
+                    (session_id, clean_roll, clean_roll, ta_id),
                 )
             conn.commit()
             return cur.rowcount > 0
@@ -1263,13 +1322,14 @@ def release_student_claim(session_id: str, roll_no: str, ta_id: str) -> bool:
 def record_student_presence(session_id: str, roll_no: str, ta_id: str) -> bool:
     """Heartbeat extending the TA's lease on a student."""
     init_hitl_db()
+    clean_roll = roll_no.strip()
     now_iso = datetime.now(timezone.utc).isoformat()
     with _LOCK:
         conn = _connect()
         try:
             cur = conn.execute(
-                "UPDATE session_students SET claimed_by = ?, claimed_at = ? WHERE session_id = ? AND roll_no = ?",
-                (ta_id, now_iso, session_id, roll_no),
+                "UPDATE session_students SET claimed_by = ?, claimed_at = ? WHERE session_id = ? AND (roll_no = ? OR roll_no = ? COLLATE NOCASE)",
+                (ta_id, now_iso, session_id, clean_roll, clean_roll),
             )
             conn.commit()
             return cur.rowcount > 0
