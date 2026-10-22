@@ -264,12 +264,24 @@
     });
   }
 
+  function resolveApiUrl(path) {
+    if (!path) return path;
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    const port = window.location.port;
+    if (port && port !== '8000' && path.startsWith('/api/')) {
+      const host = window.location.hostname || '127.0.0.1';
+      return `http://${host}:8000${path}`;
+    }
+    return path;
+  }
+
   async function api(path, options = {}, allowRetry = true) {
+    const targetUrl = resolveApiUrl(path);
     const headers = Object.assign({}, options.headers || {});
     if (state.token) headers['X-API-Key'] = state.token;
     let resp;
     try {
-      resp = await fetch(path, Object.assign({}, options, { headers }));
+      resp = await fetch(targetUrl, Object.assign({}, options, { headers }));
     } catch (_err) {
       throw new ApiError('Cannot reach the server. Check your connection and try again.', 0);
     }
@@ -1484,7 +1496,16 @@
         feedback.style.border = '1px solid #fde68a';
         feedback.textContent = 'Testing connection to Anthropic API...';
         try {
-          const res = await (await api('/api/llm/test', { method: 'POST' })).json();
+          const apiKey = $('cfgApiKeyInput') ? $('cfgApiKeyInput').value.trim() : '';
+          const model = $('cfgModelSelect') ? $('cfgModelSelect').value : '';
+          const body = {};
+          if (apiKey) body.anthropic_api_key = apiKey;
+          if (model) body.model = model;
+          const res = await (await api('/api/llm/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          })).json();
           if (res.status === 'ok') {
             feedback.style.background = '#dcfce7';
             feedback.style.color = '#15803d';

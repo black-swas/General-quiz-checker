@@ -124,7 +124,7 @@ VISION_TOOL_SCHEMA: Dict[str, Any] = {
     "name": VISION_TOOL_NAME,
     "description": (
         "Report structured grading reviews for each question found across the student's exam pages. "
-        "Returns question number, question prompt, student answer, awarded grade, max marks, grade explanation, "
+        "Returns question number, student answer, awarded grade, max marks, grade explanation, "
         "rubric step scores, confidence (0.0 to 1.0), and verdict tab."
     ),
     "input_schema": {
@@ -142,11 +142,11 @@ VISION_TOOL_SCHEMA: Dict[str, Any] = {
                         },
                         "question": {
                             "type": "string",
-                            "description": "The exact problem statement or question text detected on the exam booklet / question paper.",
+                            "description": "Short question prompt or title (keep brief, <= 15 words; omit if unchanged from question specification).",
                         },
                         "answer": {
                             "type": "string",
-                            "description": "Complete transcription of student's handwritten response, LaTeX equations, derivations, or code.",
+                            "description": "Concise transcription or summary of the student's key formula, derivation, or final result (<= 35 words; do not transcribe entire full pages). For unattempted questions, use '[Unattempted]'.",
                         },
                         "grade": {
                             "type": "number",
@@ -158,15 +158,7 @@ VISION_TOOL_SCHEMA: Dict[str, Any] = {
                         },
                         "explanation": {
                             "type": "string",
-                            "description": "Clear explanation justifying the assigned grade, breakdown of marks, and reason for any deduction.",
-                        },
-                        "question_id": {
-                            "type": "string",
-                            "description": "Question ID alias (e.g. 'Q1', 'Q2') being graded from the Question Paper JSON.",
-                        },
-                        "ocr_transcription": {
-                            "type": "string",
-                            "description": "Accurate transcription of the student's handwritten text, mathematical equations, or code.",
+                            "description": "Concise justification for awarded marks and any deductions (1-2 sentences, <= 35 words).",
                         },
                         "handwriting_legibility": {
                             "type": "number",
@@ -182,12 +174,11 @@ VISION_TOOL_SCHEMA: Dict[str, Any] = {
                                     "step": {"type": "string"},
                                     "awarded": {"type": "number"},
                                     "max": {"type": "number"},
-                                    "note": {"type": "string"},
+                                    "note": {"type": "string", "description": "Brief note (<= 8 words)."},
                                 },
                                 "required": ["step", "awarded", "max"],
                             },
                         },
-                        "awarded_marks": {"type": "number", "description": "Alias for grade"},
                         "confidence": {
                             "type": "number",
                             "minimum": 0.0,
@@ -222,15 +213,10 @@ VISION_TOOL_SCHEMA: Dict[str, Any] = {
                             "items": {"type": "string"},
                             "description": "List of diagram components, nodes, graphs, or curves detected in handwritten solution.",
                         },
-                        "ta_comment": {
-                            "type": "string",
-                            "description": "Concise comment explaining the awarded marks for the Excel export (alias for explanation).",
-                        },
                     },
                     "required": [
                         "roll_no",
                         "question_number",
-                        "question",
                         "answer",
                         "grade",
                         "max_marks",
@@ -491,16 +477,16 @@ def build_vision_system_prompt(
         "1. ROLL NUMBER VERIFICATION:\n"
         "   - Read the stamped header banner at the top of the cropped image to verify the student's `roll_no`.\n"
         "   - Ensure the evaluation object returned in `reviews` matches the exact roll number printed in that header banner.\n\n"
-        "2. ACCURATE MULTIMODAL TRANSCRIPTION (LaTeX):\n"
-        "   - Accurately transcribe all handwritten mathematical equations, derivations, formulas, algorithms, or code into `ocr_transcription`.\n"
-        "   - Standardize all mathematical expressions into standard LaTeX formatting:\n"
+        "2. CONCISE MULTIMODAL TRANSCRIPTION (LaTeX):\n"
+        "   - Capture the student's key formulas, derivations, or final results in concise LaTeX/text in `answer` (<= 35 words).\n"
+        "   - Standardize key mathematical expressions into standard LaTeX formatting:\n"
         "     * Fractions: \\frac{numerator}{denominator}\n"
         "     * Powers, roots & subscripts: x_i^2, \\sqrt{x^2 + y^2}, a_{n+1}\n"
         "     * Integrals, limits & summations: \\int_{a}^{b} f(x)\\,dx, \\lim_{x \\to 0} \\frac{\\sin x}{x}, \\sum_{i=1}^{n} i^2\n"
         "     * Matrices & vectors: \\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}, \\vec{v} \\in \\mathbb{R}^n\n"
         "     * Piecewise & systems: \\begin{cases} f(x) & x \\ge 0 \\\\ -f(x) & x < 0 \\end{cases}\n"
         "     * Greek letters & symbols: \\alpha, \\beta, \\gamma, \\theta, \\lambda, \\sigma, \\nabla, \\partial, \\infty, \\approx, \\neq, \\le, \\ge\n"
-        "   - If code or pseudocode is written, transcribe it cleanly with proper indentation and language conventions.\n\n"
+        "   - If code or pseudocode is written, record the essential logic without verbose comments.\n\n"
         "3. HANDWRITING LEGIBILITY ASSESSMENT:\n"
         "   - Output `handwriting_legibility` as a continuous score between 0.0 (completely illegible or blank) and 1.0 (crystal clear handwriting).\n"
         "   - Benchmark: 0.90-1.0 = Clean penmanship, high contrast, easily readable symbols.\n"
@@ -508,12 +494,13 @@ def build_vision_system_prompt(
         "   - Benchmark: 0.45-0.69 = Poor handwriting, messy subscripts/indices, faint pencil requiring close inspection.\n"
         "   - Benchmark: 0.00-0.44 = Illegible handwriting or heavily smudged/defocused frame.\n\n"
         "4. RIGOROUS STEP-SCORE ALLOCATION & PARTIAL CREDIT TAXONOMY:\n"
-        f"   - Break down the score into discrete `step_scores` objects, each with 'step', 'awarded', 'max', and 'note'.\n"
-        f"   - Sum of awarded marks across all steps MUST equal `awarded_marks`, which must be between 0.0 and {max_marks}.\n"
+        "   - Break down the score into discrete `step_scores` objects, each with 'step', 'awarded', 'max', and 'note' (note <= 8 words).\n"
+        f"   - Sum of awarded marks across all steps MUST equal `grade`, which must be between 0.0 and {max_marks}.\n"
         "   - Method Marks (M): Award for selecting and applying the correct mathematical principle, formula, theorem, or algorithmic approach, even if an arithmetic calculation error occurs later.\n"
         "   - Accuracy Marks (A): Award for correct algebraic reduction, exact numerical results, or correctly simplified symbolic forms resulting from a valid method.\n"
         "   - Independent Conceptual Marks (B): Award for correctly stating definitions, boundary conditions, base cases, constraints, or initial states.\n"
-        "   - Error-Carried-Forward (ECF) Policy: If a student commits an early computational arithmetic slip in Step 1 but executes all subsequent algebraic logic and steps flawlessly, award full partial method marks for Steps 2 and 3.\n\n"
+        "   - Error-Carried-Forward (ECF) Policy: If a student commits an early computational arithmetic slip in Step 1 but executes all subsequent algebraic logic and steps flawlessly, award full partial method marks for Steps 2 and 3.\n"
+        "   - For blank or unattempted crops, return step_scores: [].\n\n"
         "5. FOUR-WAY HITL TRIAGE & VERDICT ASSIGNMENT (`verdict_tab`):\n"
         "   - 'GREEN': Clean, high-confidence evaluation (confidence >= 0.88, legibility >= 0.78, anomaly_flag == 'NONE') that can be safely Auto-Approved for final student records.\n"
         "   - 'BLUE': Fully correct answer that showcases an exceptionally elegant, alternative, or creative derivation (e.g. using a clever symmetry, matrix invariant, generating function, or unusual identity instead of brute force).\n"
@@ -532,7 +519,7 @@ def build_vision_system_prompt(
         "EXAMINER COMPLIANCE & OUTPUT SPECIFICATION\n"
         "================================================================================\n"
         "For each student crop, generate one structured review inside the `reviews` list of the report_handwritten_reviews tool call.\n"
-        "Ensure all fields are fully populated with exact numerical precision, valid JSON types, and rigorous academic justifications.\n"
+        "Keep explanations (<= 35 words) and student answer summaries (<= 35 words) concise and academically precise.\n"
     )
 
 
@@ -616,18 +603,18 @@ def build_whole_page_vision_system_prompt(
         f"   Do not rely solely on pre-set questions: extract both the question number and the problem text directly from the paper.\n"
         f"   For each question found across the student's pages, report in `{VISION_TOOL_NAME}`:\n"
         f"   - `question_number`: identified question number/sub-part (e.g. 'Q1', '2(a)', 'Problem 3')\n"
-        f"   - `question`: detected problem statement or prompt text\n"
-        f"   - `answer`: complete student answer transcription (math derivations in standard LaTeX, code, or explanation)\n"
+        f"   - `question`: detected problem statement or prompt text (keep brief, <= 15 words; omit if unchanged from question specification)\n"
+        f"   - `answer`: concise summary of student's key formula, derivation, or final result (<= 35 words; do not transcribe entire full pages)\n"
         f"   - `grade`: awarded numerical marks (float)\n"
         f"   - `max_marks`: total marks possible for this question\n"
-        f"   - `explanation`: thorough explanation justifying the awarded grade and any partial credit deductions\n"
-        f"   - `step_scores`: list of rubric step objects summing to `grade`\n"
+        f"   - `explanation`: concise justification for the awarded marks and any deductions (1-2 sentences, <= 35 words)\n"
+        f"   - `step_scores`: list of compact rubric step objects summing to `grade` (use [] for unattempted)\n"
         f"   - `confidence`: confidence score between 0.0 and 1.0\n"
         f"   - `verdict_tab`: 'GREEN' (correct/standard), 'BLUE' (creative/unusual derivation), 'RED' (defect/calculation error/review needed), 'GRAY' (illegible/unverified)\n"
         f"   - `anomaly_flag`: 'NONE', 'ILLEGIBLE_HANDWRITING', etc.\n"
-        f"2. UNATTEMPTED QUESTIONS: If a question is not attempted or left blank anywhere on the page, return grade=0.0, max_marks=question.max_marks, confidence=1.0, verdict_tab='GREEN', answer='[Question Skipped / Blank Answer Space]', explanation='Question unattempted by student.'\n"
-        f"3. MULTIMODAL TRANSCRIPTION (LaTeX): Transcribe all handwritten equations, derivations, matrices, formulas, code, or text into standard LaTeX/markdown in `answer`.\n"
-        f"4. PARTIAL CREDIT ALLOCATION: Break down marks into discrete `step_scores` (steps must sum to grade). Apply Error-Carried-Forward (ECF) for arithmetic or notation slips if subsequent method logic is valid.\n"
+        f"2. UNATTEMPTED QUESTIONS: If a question is not attempted or left blank anywhere on the page, return: grade=0.0, max_marks=question.max_marks, confidence=1.0, verdict_tab='GRAY', answer='[Unattempted]', explanation='Unattempted.', step_scores=[]\n"
+        f"3. CONCISE STUDENT ANSWER SUMMARY: In `answer`, capture only the student's key formula, derivation step, or final result in concise LaTeX/text (<= 35 words). Do NOT perform exhaustive whole-page transcription (the human grader inspects the scanned image crop in the UI).\n"
+        f"4. PARTIAL CREDIT ALLOCATION: Keep `step_scores` compact (1-3 key rubric steps). In each step object, keep `note` very brief (<= 8 words). Steps must sum to `grade`. For unattempted or zero-mark questions, use `step_scores: []`.\n"
         f"5. SUBJECT-SPECIFIC GRADING TAXONOMY:\n"
         f"   - Coding: Check logic, edge cases, loop invariants, asymptotic complexity, even with minor syntax slips.\n"
         f"   - Physics: Check physical principles, vector laws, diagrams, equations of motion, correct SI units.\n"
@@ -636,7 +623,7 @@ def build_whole_page_vision_system_prompt(
         f"   - Mathematics: Check rigor, algebraic transformations, assumptions, boundary conditions, steps.\n"
         f"   - Economics: Check constrained optimization, equilibrium formulas, graphical axes/curves, intuition.\n"
         f"6. VERDICT TABS: 'GREEN' (correct/standard), 'BLUE' (creative/distinctive derivation), 'RED' (logical defect, calculation error, or needs TA review), 'GRAY' (illegible/blank).\n"
-        f"7. EXPLANATION: Provide a clear justification in `explanation` explaining the marks awarded for each question.\n\n"
+        f"7. CONCISE EXPLANATION: In `explanation`, provide a concise 1-2 sentence justification for the marks awarded and any deduction (<= 35 words).\n\n"
         f"{SUBPART_DISAMBIGUATION_INSTRUCTION}"
         f"{CALIBRATION_EXEMPLARS_TAXONOMY}"
     )
@@ -1298,7 +1285,7 @@ async def evaluate_session_question_crops(
                         break
                     payload = {
                         "model": model,
-                        "max_tokens": min(8000, 500 * len(batch) + 500),
+                        "max_tokens": min(4096, 250 * len(batch) + 300),
                         "system": [
                             {
                                 "type": "text",
@@ -1735,7 +1722,7 @@ async def evaluate_session_whole_pages(
                     break
                 payload = {
                     "model": model,
-                    "max_tokens": min(8000, 700 * len(batch) * len(questions) + 500),
+                    "max_tokens": min(4096, 250 * len(batch) * max(1, len(questions)) + 300),
                     "system": [
                         {
                             "type": "text",

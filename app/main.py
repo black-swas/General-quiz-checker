@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+import httpx
 import numpy as np
 from fastapi import Body, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -152,7 +153,7 @@ def _ensure_session_grading_worker(session_id: str) -> None:
         task = asyncio.create_task(_session_grading_worker(session_id))
         _session_worker_tasks[session_id] = task
         _background_tasks[f"worker:{session_id}"] = task
-        task.add_done_callback(lambda _t, sid=session_id: _background_tasks.pop(f"worker:{sid}", None))
+        task.add_done_callback(lambda _t, sid=session_id: (_background_tasks.pop(f"worker:{sid}", None), _session_worker_tasks.pop(sid, None)))
 
 
 async def _session_grading_worker(session_id: str) -> None:
@@ -162,8 +163,8 @@ async def _session_grading_worker(session_id: str) -> None:
     while True:
         try:
             try:
-                item = await asyncio.wait_for(q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+                item = await asyncio.wait_for(q.get(), timeout=15.0)
+            except (asyncio.TimeoutError, TimeoutError):
                 break
             roll_no, qid, force_recrop = item
             try:
@@ -330,8 +331,8 @@ if settings.allowed_origins:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -468,14 +469,22 @@ def hub_info(request: Request, _auth: Any = Depends(require_auth)) -> Dict[str, 
     root = _storage_root()
     return {
         "version": settings.app_version,
+        "status": "ok",
+        "laptop_name": socket.gethostname(),
         "local_ips": ips,
+        "ip": ips[0] if ips else "127.0.0.1",
+        "all_ips": ips,
         "port": port,
         "scheme": scheme,
         "scanner_url": primary_url,
+        "laptop_url": laptop_url,
         "laptop_dashboard_url": laptop_url,
         "all_scanner_urls": [f"{scheme}://{ip}:{port}/scan" for ip in ips],
         "storage_dir": str(root),
+        "paper_storage_dir": str(root),
         "disk": _disk_stats(root),
+        "anthropic_configured": bool(settings.anthropic_api_key),
+        "primary_model": settings.primary_model,
         "llm_model": settings.primary_model,
         "vlm_provider": settings.vlm_provider,
         "local_vlm_url": settings.local_vlm_url,
@@ -484,8 +493,10 @@ def hub_info(request: Request, _auth: Any = Depends(require_auth)) -> Dict[str, 
         "llm_concurrency": settings.llm_concurrency,
         "llm_vision_batch_size": settings.llm_vision_batch_size,
         "auto_approve_threshold": settings.auto_approve_confidence_threshold,
+        "auto_approve_confidence_threshold": settings.auto_approve_confidence_threshold,
         "max_students": settings.max_students_per_session,
         "max_pages_per_student": settings.max_pages_per_student,
+        "active_sessions_count": len(list_exam_sessions(limit=500)),
         "recent_events": [{"ts": e["ts"], "kind": e["kind"], "message": e["message"]} for e in _RECENT_EVENTS[:20]],
     }
 
@@ -557,33 +568,52 @@ def api_update_runtime_settings(req: RuntimeSettingsUpdateRequest, _auth: Any = 
 
 
 @app.post("/api/llm/test")
-async def api_test_llm_connection(_auth: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def api_test_llm_connection(
+    req: Optional[Dict[str, Any]] = Body(default=None),
+    _auth: Any = Depends(require_auth),
+) -> Dict[str, Any]:
     """Test LLM credentials and availability by making a small handshake or checking key validity."""
-    if not settings.llm_available or not settings.anthropic_api_key:
+    api_key = ((req.get("anthropic_api_key") if req else None) or "").strip() or settings.anthropic_api_key
+    model = ((req.get("model") or req.get("primary_model") if req else None) or "").strip() or settings.primary_model or "claude-haiku-5-5"
+
+    if not api_key:
         return {
             "status": "error",
-            "message": "No Anthropic API key configured on this laptop. Add ANTHROPIC_API_KEY in Settings or .env.",
+            "message": "No Anthropic API key configured. Enter your API key above or in .env.",
             "llm_available": False,
         }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             headers = {
-                "x-api-key": settings.anthropic_api_key,
+                "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             }
             payload = {
-                "model": settings.primary_model,
+                "model": model,
                 "max_tokens": 10,
                 "messages": [{"role": "user", "content": "Ping"}],
             }
             resp = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
             if resp.status_code == 200:
+                settings.anthropic_api_key = api_key
+                settings.primary_model = model
+                settings.llm_enabled = True
                 return {
                     "status": "ok",
-                    "message": f"Successfully connected to Anthropic API ({settings.primary_model})",
+                    "message": f"Successfully connected to Anthropic API ({model})",
                     "llm_available": True,
-                    "model": settings.primary_model,
+                    "model": model,
+                }
+            elif resp.status_code == 429:
+                settings.anthropic_api_key = api_key
+                settings.primary_model = model
+                settings.llm_enabled = True
+                return {
+                    "status": "ok",
+                    "message": f"API key is valid & authenticated ({model}), but currently rate-limited (HTTP 429). Ready for use.",
+                    "llm_available": True,
+                    "model": model,
                 }
             else:
                 err_data = resp.json().get("error", {}) if resp.headers.get("content-type", "").startswith("application/json") else {}
@@ -970,6 +1000,14 @@ def api_delete_student_page(session_id: str, roll_no: str, page_no: int, _auth: 
                     p.unlink()
                 except OSError:
                     pass
+        proc_p = Path(rec.get("processed_path") or "")
+        if proc_p.parent.is_dir():
+            for sibling in (proc_p.with_name(f"page_{page_no}_top.jpg"), proc_p.with_name(f"page_{page_no}_bottom.jpg")):
+                if sibling.is_file():
+                    try:
+                        sibling.unlink()
+                    except OSError:
+                        pass
     deleted = delete_scanned_page_record(session_id, roll_no, page_no)
     return {"status": "deleted" if deleted else "not_found", "roll_no": roll_no, "page_no": page_no}
 
@@ -1268,6 +1306,87 @@ def api_get_page_image(
     return FileResponse(target, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/sessions/{session_id}/students/{roll_no}/pages/{page_no}/rotate")
+async def api_rotate_student_page(
+    session_id: str,
+    roll_no: str,
+    page_no: int,
+    angle: int = 90,
+    _auth: Any = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Rotate an existing scanned student page by 90/180/270 degrees and regenerate processed halves and crops."""
+    session = get_exam_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found.")
+
+    rec = get_scanned_page_record(session_id, roll_no, page_no)
+    if not rec:
+        raise HTTPException(404, f"Page {page_no} for student '{roll_no}' not found.")
+
+    raw_path = Path(rec.get("raw_path") or "")
+    proc_path = Path(rec.get("processed_path") or "")
+    if not raw_path.is_file():
+        raise HTTPException(404, "Raw page image file missing on disk.")
+
+    img = cv2.imread(str(raw_path))
+    if img is None:
+        raise HTTPException(400, "Could not decode page image for rotation.")
+
+    rot_flag = cv2.ROTATE_90_CLOCKWISE
+    if angle == 180:
+        rot_flag = cv2.ROTATE_180
+    elif angle in (270, -90):
+        rot_flag = cv2.ROTATE_90_COUNTERCLOCKWISE
+
+    rotated = cv2.rotate(img, rot_flag)
+    cv2.imwrite(str(raw_path), rotated, [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+    cv_info = await asyncio.to_thread(process_and_save_page, raw_path, proc_path)
+
+    safe_sid = _safe_segment(session_id)
+    safe_roll = _safe_segment(roll_no)
+    crops_dir = _session_storage_root(session) / safe_sid / safe_roll / "crops"
+    questions_on_page = [q for q in (session.get("questions") or []) if int(q.get("page_number", 1)) == int(page_no)]
+    if not questions_on_page and int(page_no) == 1:
+        crop_path = crops_dir / "Q1.jpg"
+        try:
+            top_half = proc_path.parent / "page_1_top.jpg"
+            if top_half.is_file():
+                shutil.copy2(top_half, crop_path)
+            elif proc_path.is_file():
+                shutil.copy2(proc_path, crop_path)
+        except Exception:
+            pass
+    for q in questions_on_page:
+        qid = str(q.get("question_id", "Q1"))
+        crop_path = crops_dir / f"{qid}.jpg"
+        try:
+            await asyncio.to_thread(crop_question_from_page, proc_path, crop_path, roll_no, rec.get("student_name", ""), q)
+        except Exception:
+            pass
+
+    updated_rec = save_scanned_page_record(
+        session_id=session_id,
+        roll_no=roll_no,
+        page_no=page_no,
+        raw_path=str(raw_path),
+        processed_path=str(proc_path),
+        blur_score=cv_info["blur_score"],
+        is_sharp=cv_info["is_sharp"],
+        file_size_bytes=raw_path.stat().st_size,
+        sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+        is_retake=rec.get("is_retake", False),
+    )
+    _push_event(
+        "rotate",
+        f"Rotated Roll {roll_no} · Page {page_no} by {angle}°",
+        session_id=session_id,
+        roll_no=roll_no,
+        page_no=page_no,
+    )
+    return {"status": "ok", "message": f"Rotated page {page_no} by {angle}°", "page": updated_rec}
+
+
 @app.get("/api/sessions/{session_id}/students/{roll_no}/questions/{question_id}/crop")
 def api_get_question_crop_image(
     session_id: str,
@@ -1308,11 +1427,20 @@ async def _run_session_async_grading(
         questions = session.get("questions") or []
         if only_question_id:
             questions = [q for q in questions if str(q.get("question_id")) == only_question_id]
+        if not questions:
+            questions = [{
+                "question_id": "Q1",
+                "title": "Complete Exam",
+                "max_marks": 20.0,
+                "page_number": 1,
+                "problem_statement": "Evaluate the student solution on the answer sheets.",
+                "grading_rubric": "Step 1: Conceptual accuracy and problem setup\nStep 2: Method and derivations\nStep 3: Final result and units",
+            }]
         students = session.get("students") or []
         if only_roll_no:
             students = [s for s in students if s["roll_no"] == only_roll_no]
 
-        if not students or not questions:
+        if not students:
             update_exam_session(session_id, status="ACTIVE", grading_progress=1.0, grading_stage="No student pages to grade yet")
             return
 
@@ -1365,15 +1493,22 @@ async def _run_session_async_grading(
                     proc_page = student_dir / "raw" / "page_1.jpg"
                 crops_dir = student_dir / "crops"
                 crops_dir.mkdir(parents=True, exist_ok=True)
-                if proc_page.is_file():
-                    for q in target_questions:
-                        qid = str(q["question_id"])
-                        crop_path = crops_dir / f"{qid}.jpg"
-                        if force_recrop or not crop_path.is_file():
-                            try:
-                                shutil.copy2(proc_page, crop_path)
-                            except Exception:
-                                pass
+                for q in target_questions:
+                    qid = str(q["question_id"])
+                    pno = int(q.get("page_number", 1) or 1)
+                    q_page = student_dir / "processed" / f"page_{pno}_top.jpg"
+                    if not q_page.is_file():
+                        q_page = student_dir / "processed" / f"page_{pno}_flattened.jpg"
+                    if not q_page.is_file():
+                        q_page = student_dir / "raw" / f"page_{pno}.jpg"
+                    if not q_page.is_file():
+                        q_page = proc_page
+                    crop_path = crops_dir / f"{qid}.jpg"
+                    if (force_recrop or not crop_path.is_file()) and q_page and q_page.is_file():
+                        try:
+                            shutil.copy2(q_page, crop_path)
+                        except Exception:
+                            pass
 
             total_items = max(1, len(students) * len(target_questions))
             completed_items = 0

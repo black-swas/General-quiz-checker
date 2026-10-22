@@ -71,11 +71,23 @@
     toastTimer = setTimeout(() => { el.hidden = true; }, 3500);
   }
 
+  function resolveApiUrl(path) {
+    if (!path) return path;
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    const port = window.location.port;
+    if (port && port !== '8000' && path.startsWith('/api/')) {
+      const host = window.location.hostname || '127.0.0.1';
+      return `http://${host}:8000${path}`;
+    }
+    return path;
+  }
+
   async function api(path, options = {}) {
+    const targetUrl = resolveApiUrl(path);
     const headers = Object.assign({}, options.headers || {});
     const token = sessionStorage.getItem('qe_token') || '';
     if (token) headers['X-API-Key'] = token;
-    const resp = await fetch(path, Object.assign({}, options, { headers }));
+    const resp = await fetch(targetUrl, Object.assign({}, options, { headers }));
     if (!resp.ok) {
       let detail = resp.statusText;
       try {
@@ -419,26 +431,27 @@
       const info = await (await api('/api/hub-info')).json();
       state.hubInfo = info;
       const sessionParam = state.activeSessionId ? `?session=${encodeURIComponent(state.activeSessionId)}` : '';
-      const fullScannerUrl = `${info.scanner_url}${sessionParam}`;
-      $('hubIpBadge').textContent = `Mobile Link: ${info.scanner_url}`;
+      const fullScannerUrl = `${info.scanner_url || ''}${sessionParam}`;
+      $('hubIpBadge').textContent = `Mobile Link: ${info.scanner_url || 'http://127.0.0.1:8000/scan'}`;
       $('directScannerUrlInput').value = fullScannerUrl;
-      $('hubQrImg').src = `/api/qr.svg?url=${encodeURIComponent(fullScannerUrl)}&t=${Date.now()}`;
-      $('activeStorageDirText').textContent = (state.session && state.session.storage_dir) || info.storage_dir;
+      $('hubQrImg').src = resolveApiUrl(`/api/qr.svg?url=${encodeURIComponent(fullScannerUrl)}&t=${Date.now()}`);
+      $('activeStorageDirText').textContent = (state.session && state.session.storage_dir) || info.storage_dir || info.paper_storage_dir || 'Default Data Folder';
       if (!$('inpStorageDir').value) {
-        $('inpStorageDir').value = info.storage_dir;
+        $('inpStorageDir').value = info.storage_dir || info.paper_storage_dir || '';
       }
       if (info.disk) {
         $('freeDiskText').textContent = `${info.disk.free_gb} GB free`;
       }
-      $('cfgModel').value = info.llm_model || 'claude-haiku-5-5';
+      const activeModel = info.llm_model || info.primary_model || 'claude-haiku-5-5';
+      $('cfgModel').value = activeModel;
       if ($('cfgLocalVlmUrl') && info.local_vlm_url) {
         $('cfgLocalVlmUrl').value = info.local_vlm_url;
       }
       $('cfgConcurrency').value = info.llm_concurrency || 6;
       $('cfgBatchSize').value = info.llm_vision_batch_size || 5;
-      $('cfgAutoApprove').value = info.auto_approve_threshold || 0.85;
+      $('cfgAutoApprove').value = info.auto_approve_threshold || info.auto_approve_confidence_threshold || 0.85;
 
-      updateVlmStatusBadge(info.vlm_provider, info.llm_model);
+      updateVlmStatusBadge(info.vlm_provider, activeModel);
     } catch (_e) { /* ignore */ }
   }
 
@@ -1209,11 +1222,11 @@
       $('activeSessionMeta').textContent = 'Please create or select a session in Step 1 first.';
       return;
     }
-    const maxPages = Math.min(25, Math.max(1, s.expected_pages || 4));
-    if (state.currentPage > maxPages) state.currentPage = 1;
+    const expPages = Math.min(25, Math.max(1, s.expected_pages || 4));
+    state.currentPage = Math.min(25, Math.max(1, state.currentPage || 1));
 
     $('activeSessionBanner').textContent = `${s.session_id} — ${s.exam_name} (${s.course_code})`;
-    $('activeSessionMeta').textContent = `Folder: ${s.storage_dir} · Max ${maxPages} pages/student`;
+    $('activeSessionMeta').textContent = `Folder: ${s.storage_dir} · Expected ${expPages} pages/student`;
     $('studentProgressCounter').textContent = `${s.student_count || 0} / 400 students (${s.pages_scanned || 0} pages)`;
 
     const stRecord = getActiveStudentRecord();
@@ -1223,21 +1236,22 @@
     }
     const uploadedPages = new Set((stRecord ? stRecord.pages || [] : []).map((p) => p.page_no));
 
-    const highestPage = Math.max(maxPages, ...(uploadedPages.size ? Array.from(uploadedPages) : [1]), state.currentPage);
+    const highestPage = Math.max(expPages, ...(uploadedPages.size ? Array.from(uploadedPages) : [1]), state.currentPage);
+    const isExtraTarget = state.currentPage > expPages;
     const targetLabel = $('currentScanningTargetText');
     if (targetLabel) {
-      targetLabel.textContent = state.currentPage > maxPages
-        ? `Extra Sheet #${state.currentPage - maxPages} (Page ${state.currentPage})`
-        : `Sheet ${state.currentPage} of ${maxPages}`;
+      targetLabel.textContent = isExtraTarget
+        ? `Extra Sheet #${state.currentPage - expPages} (Page ${state.currentPage})`
+        : `Sheet ${state.currentPage} of ${expPages}`;
     }
     const snapLabelNo = $('lblSnapPageNo');
     if (snapLabelNo) {
-      snapLabelNo.textContent = String(state.currentPage);
+      snapLabelNo.textContent = isExtraTarget ? `${state.currentPage} (Extra #${state.currentPage - expPages})` : String(state.currentPage);
     }
     if ($('hudPageBadge')) {
-      $('hudPageBadge').textContent = state.currentPage > maxPages
-        ? `Extra Sheet #${state.currentPage - maxPages} (Page ${state.currentPage})`
-        : `Page ${state.currentPage} of ${maxPages}`;
+      $('hudPageBadge').textContent = isExtraTarget
+        ? `Extra Sheet #${state.currentPage - expPages} (Page ${state.currentPage})`
+        : `Page ${state.currentPage} of ${expPages}`;
     }
     if ($('btnSnapPhoto')) {
       $('btnSnapPhoto').textContent = uploadedPages.has(state.currentPage)
@@ -1248,16 +1262,30 @@
       $('btnRetakePage').hidden = !uploadedPages.has(state.currentPage);
     }
 
+    // Wire dedicated + Extra Page button in hero row
+    const btnHeroExtra = $('btnCaptureAddExtraPage');
+    if (btnHeroExtra) {
+      btnHeroExtra.onclick = () => {
+        const nextExtra = highestPage + 1;
+        state.currentPage = Math.min(25, nextExtra);
+        toast(`➕ Switched to Extra Sheet #${state.currentPage - expPages} (Page ${state.currentPage})`);
+        renderCapturePanel();
+        const camInput = $('fallbackCameraInput');
+        if (camInput) camInput.click();
+      };
+    }
+
     const strip = $('pageSlotsStrip');
     const slots = [];
     for (let p = 1; p <= highestPage; p++) {
       const isDone = uploadedPages.has(p);
       const isActive = p === state.currentPage;
-      const isExtra = p > maxPages;
+      const isExtra = p > expPages;
       slots.push(h('button', {
         type: 'button',
         class: `page-slot-btn${isActive ? ' active' : ''}${isDone ? ' done' : ''}${isExtra ? ' extra' : ''}`,
-        text: isExtra ? `Extra #${p - maxPages}${isDone ? ' ✓' : ''}` : `Page ${p}${isDone ? ' ✓' : ''}`,
+        text: isExtra ? `Extra #${p - expPages}${isDone ? ' ✓' : ''}` : `Page ${p}${isDone ? ' ✓' : ''}`,
+        title: isExtra ? `Supplementary Sheet #${p - expPages} (Page ${p})` : `Booklet Page ${p}`,
         onclick: () => {
           state.currentPage = p;
           renderCapturePanel();
@@ -1267,12 +1295,15 @@
     slots.push(h('button', {
       type: 'button',
       class: 'page-slot-btn extra',
-      style: 'color:var(--brand);border-color:var(--brand);border-style:dashed;',
+      style: 'color:var(--brand);border-color:var(--brand);border-style:dashed;font-weight:700;',
       text: '+ Extra Sheet',
       title: 'Scan supplementary answer sheet for this student',
       onclick: () => {
-        state.currentPage = highestPage + 1;
+        state.currentPage = Math.min(25, highestPage + 1);
+        toast(`➕ Switched to Extra Sheet #${state.currentPage - expPages} (Page ${state.currentPage})`);
         renderCapturePanel();
+        const camInput = $('fallbackCameraInput');
+        if (camInput) camInput.click();
       },
     }));
     strip.replaceChildren(...slots);
@@ -1290,23 +1321,75 @@
       } else {
         if (noSheetsNotice) noSheetsNotice.hidden = true;
         trayBox.replaceChildren(...pList.map((p) => {
+          const isExtra = p.page_no > expPages;
+          const sheetLabel = isExtra ? `Extra #${p.page_no - expPages} (Page ${p.page_no})` : `Sheet ${p.page_no}`;
           return h('div', { class: 'sheet-tray-card' },
             h('img', { src: `${p.image_url}?v=${Date.now()}`, alt: `Sheet ${p.page_no}` }),
             h('div', null,
-              h('div', { style: 'font-weight:700;font-size:0.86rem;color:var(--text);' }, `Sheet ${p.page_no}`),
+              h('div', { style: 'font-weight:700;font-size:0.86rem;color:var(--text);' }, sheetLabel),
               h('span', { class: 'pill pill-ok', style: 'font-size:0.7rem;padding:2px 6px;' }, '✓ Top & Bottom Halves Ready (2x)')
             ),
-            h('button', {
-              type: 'button',
-              class: 'btn btn-sm btn-ghost',
-              style: 'margin-left:8px;font-size:0.75rem;',
-              text: '🔄 Retake',
-              onclick: () => {
-                state.currentPage = p.page_no;
-                renderCapturePanel();
-                $('fallbackCameraInput').click();
-              },
-            })
+            h('div', { style: 'display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;' },
+              h('button', {
+                type: 'button',
+                class: 'btn btn-sm btn-ghost',
+                style: 'font-size:0.75rem;',
+                text: '🔄 Retake',
+                title: 'Retake photo for this sheet',
+                onclick: () => {
+                  state.currentPage = p.page_no;
+                  renderCapturePanel();
+                  $('fallbackCameraInput').click();
+                },
+              }),
+              h('button', {
+                type: 'button',
+                class: 'btn btn-sm btn-ghost',
+                style: 'font-size:0.75rem;color:var(--brand);border:1px solid var(--border-strong);',
+                text: '↻ Rotate 90°',
+                title: 'Rotate sheet 90° clockwise if sideways or upside-down',
+                onclick: async () => {
+                  const targetRoll = state.currentRoll || (stRecord && stRecord.roll_no);
+                  if (!targetRoll) {
+                    toast('Enter a roll number first.');
+                    return;
+                  }
+                  try {
+                    await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/students/${encodeURIComponent(targetRoll)}/pages/${p.page_no}/rotate`, {
+                      method: 'POST',
+                    });
+                    playSuccessChime();
+                    toast(`↻ Rotated ${sheetLabel} 90° clockwise!`);
+                    await refreshActiveSession(false);
+                    renderCapturePanel();
+                  } catch (err) {
+                    toast(`Rotation failed: ${err.message}`);
+                  }
+                },
+              }),
+              h('button', {
+                type: 'button',
+                class: 'btn btn-sm btn-ghost',
+                style: 'font-size:0.75rem;color:#dc2626;border:1px solid rgba(220,38,38,0.25);',
+                text: '🗑 Delete',
+                title: 'Delete this sheet if captured by mistake',
+                onclick: async () => {
+                  const targetRoll = state.currentRoll || (stRecord && stRecord.roll_no);
+                  if (!targetRoll) return;
+                  if (!confirm(`Delete ${sheetLabel} for Roll ${targetRoll}?`)) return;
+                  try {
+                    await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/students/${encodeURIComponent(targetRoll)}/pages/${p.page_no}`, {
+                      method: 'DELETE',
+                    });
+                    toast(`🗑 Deleted ${sheetLabel}`);
+                    await refreshActiveSession(false);
+                    renderCapturePanel();
+                  } catch (err) {
+                    toast(`Delete failed: ${err.message}`);
+                  }
+                },
+              })
+            )
           );
         }));
       }
@@ -1892,6 +1975,7 @@
       fd.append('student_name', name);
       fd.append('page_no', String(pageBeingSaved));
       fd.append('is_retake', String(isRetake));
+      if (state.taName) fd.append('ta_name', state.taName);
       const uploadName = (rawBlob && rawBlob.name) || (rawBlob && rawBlob.type === 'application/pdf' ? `page_${pageBeingSaved}.pdf` : `page_${pageBeingSaved}.jpg`);
       fd.append('file', blob, uploadName);
       const resp = await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/upload-page`, {
@@ -1916,7 +2000,8 @@
       toast(`✓ Queued Roll ${roll} · Page ${pageBeingSaved} (${Math.round(blob.size / 1024)} KB)`);
     }
 
-    if (state.currentPage < maxPages) {
+    const expPages = (state.session && state.session.expected_pages) || 1;
+    if (state.currentPage < expPages) {
       state.currentPage += 1;
     }
     renderCapturePanel();
@@ -1932,19 +2017,22 @@
     }
     try {
       await flushChunkQueue();
-      await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/finalize-student`, {
+      const finResp = await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/finalize-student`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roll_no: roll, student_name: name, trigger_grading: false, ta_name: state.taName || undefined }),
       });
+      const finData = await finResp.json();
 
       const expPages = (state.session && state.session.expected_pages) || 1;
       const stRecord = getActiveStudentRecord();
       const uploadedCount = (stRecord && stRecord.pages) ? stRecord.pages.length : 0;
-      if (uploadedCount > 0 && uploadedCount < expPages) {
+      if (finData && finData.missing_pages && finData.missing_pages.length > 0) {
+        toast(`⚠️ Roll ${roll}: Missing Sheet(s) ${finData.missing_pages.join(', ')}! Student packet is incomplete.`);
+      } else if (uploadedCount > 0 && uploadedCount < expPages) {
         toast(`⚠️ Warning: Roll ${roll} only has ${uploadedCount} of ${expPages} expected sheets! Finalized.`);
       } else {
-        toast(`✓ Finalized ${roll}. Ready for next student!`);
+        toast(`✓ Finalized Roll ${roll}. Ready for next student!`);
       }
 
       $('scanRollNo').value = '';
@@ -2142,6 +2230,26 @@
             title: `Click to view Sheet ${p.page_no} (Bottom Half) in Lightbox`,
             text: `Sheet ${p.page_no} Bottom`,
             onclick: () => openImageLightbox(`${p.image_url}?half=bottom&v=${versionTag}`, `Roll ${student.roll_no} · Sheet ${p.page_no} (Bottom Half)`),
+          }),
+          h('button', {
+            type: 'button',
+            class: 'btn btn-sm btn-ghost',
+            style: 'border:1px solid var(--border-strong);cursor:pointer;color:var(--brand);font-size:0.75rem;',
+            title: `Rotate Sheet ${p.page_no} 90° clockwise`,
+            text: `↻ Rotate ${p.page_no}`,
+            onclick: async () => {
+              try {
+                await api(`/api/sessions/${encodeURIComponent(s.session_id)}/students/${encodeURIComponent(student.roll_no)}/pages/${p.page_no}/rotate`, {
+                  method: 'POST',
+                });
+                playSuccessChime();
+                toast(`↻ Rotated Sheet ${p.page_no} 90° clockwise!`);
+                await refreshActiveSession(false);
+                renderReviewDashboard();
+              } catch (err) {
+                toast(`Rotate failed: ${err.message}`);
+              }
+            },
           }),
         ]))
       : null;
@@ -3142,6 +3250,54 @@
       });
     }
     if ($('btnSaveRuntimeSettings')) $('btnSaveRuntimeSettings').addEventListener('click', saveRuntimeSettings);
+    if ($('btnTestAnthropicKey')) {
+      $('btnTestAnthropicKey').addEventListener('click', async () => {
+        const feedback = $('cfgApiKeyTestFeedback');
+        if (feedback) {
+          feedback.hidden = false;
+          feedback.style.background = '#fef3c7';
+          feedback.style.color = '#92400e';
+          feedback.style.border = '1px solid #fde68a';
+          feedback.textContent = 'Testing connection to Anthropic API...';
+        }
+        try {
+          const keyInput = $('cfgApiKey').value.trim();
+          const model = $('cfgModel').value || 'claude-haiku-5-5';
+          const body = {};
+          if (keyInput) body.anthropic_api_key = keyInput;
+          if (model) body.model = model;
+          const resp = await api('/api/llm/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const res = await resp.json();
+          if (feedback) {
+            if (res.status === 'ok') {
+              feedback.style.background = '#dcfce7';
+              feedback.style.color = '#15803d';
+              feedback.style.border = '1px solid #86efac';
+              feedback.textContent = `✓ ${res.message}`;
+            } else {
+              feedback.style.background = '#fee2e2';
+              feedback.style.color = '#b91c1c';
+              feedback.style.border = '1px solid #fca5a5';
+              feedback.textContent = `✕ ${res.message}`;
+            }
+          }
+          toast(res.message);
+          await refreshHubInfo();
+        } catch (err) {
+          if (feedback) {
+            feedback.style.background = '#fee2e2';
+            feedback.style.color = '#b91c1c';
+            feedback.style.border = '1px solid #fca5a5';
+            feedback.textContent = `✕ Connection test failed: ${err.message}`;
+          }
+          toast(`Test failed: ${err.message}`);
+        }
+      });
+    }
 
     if ($('btnCreateSession')) $('btnCreateSession').addEventListener('click', createNewSession);
     if ($('btnUpdateSession')) $('btnUpdateSession').addEventListener('click', updateCurrentSession);

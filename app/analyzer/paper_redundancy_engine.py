@@ -339,21 +339,19 @@ def detect_and_fix_orientation(img_bgr: np.ndarray) -> Tuple[np.ndarray, int]:
     # 1. First ensure portrait aspect ratio (h > w)
     if w > h:
         rotated = cv2.rotate(rotated, cv2.ROTATE_90_CLOCKWISE)
-        total_rot += 90
+        total_rot = 90
         h, w = rotated.shape[:2]
 
-    # 2. Check upside-down orientation (180°) via ink distribution
-    # Exam papers typically have heavy title/metadata banners at the top (top 20%) compared to bottom (bottom 20%)
+    # 2. Orientation check (180° upside-down detection)
+    # Only trigger if top is almost completely blank (<0.015 ink) while bottom has heavy header-like ink (>0.15 ink, >6x ratio)
     gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
-    top_band = gray[: int(h * 0.22), :]
-    bot_band = gray[int(h * 0.78) :, :]
+    top_band = gray[: int(h * 0.20), :]
+    bot_band = gray[int(h * 0.80) :, :]
 
     top_ink = float(np.mean(top_band < 165))
     bot_ink = float(np.mean(bot_band < 165))
 
-    # If bottom band is heavier than top band (e.g. 2.8x more ink), page was captured upside-down.
-    # Note: perspective flattening runs before this step, guaranteeing desk background is already eliminated.
-    if bot_ink > 0.05 and bot_ink > (top_ink * 2.8):
+    if top_ink < 0.015 and bot_ink > 0.15 and bot_ink > (top_ink * 6.0):
         rotated = cv2.rotate(rotated, cv2.ROTATE_180)
         total_rot = (total_rot + 180) % 360
         logger.info("Auto-corrected 180° upside-down page orientation (bot_ink=%.4f vs top_ink=%.4f)", bot_ink, top_ink)
@@ -549,30 +547,38 @@ def validate_image_buffer_integrity(data: bytes) -> Tuple[bool, str]:
 # 17. Canonical A4 Canvas Aspect Ratio Normalizer
 # ---------------------------------------------------------------------------
 def normalize_canvas_dimensions(img_bgr: np.ndarray) -> np.ndarray:
-    """Pad arbitrary aspect ratio onto a canonical A4 white canvas without non-linear distortion."""
+    """Pad arbitrary aspect ratio onto a canonical A4 white canvas without non-linear distortion.
+
+    Preserves original scan orientation: landscape images remain on landscape A4 canvas,
+    portrait images remain on portrait A4 canvas.
+    """
     if img_bgr is None or img_bgr.size == 0:
         return img_bgr
 
     h, w = img_bgr.shape[:2]
-    target_ratio = CANONICAL_HEIGHT / CANONICAL_WIDTH  # ~1.414
+    is_landscape = w > h
+    canon_w = CANONICAL_HEIGHT if is_landscape else CANONICAL_WIDTH
+    canon_h = CANONICAL_WIDTH if is_landscape else CANONICAL_HEIGHT
+
+    target_ratio = canon_h / canon_w
     current_ratio = h / w
 
     if abs(current_ratio - target_ratio) < 0.05:
-        return cv2.resize(img_bgr, (CANONICAL_WIDTH, CANONICAL_HEIGHT), interpolation=cv2.INTER_CUBIC)
+        return cv2.resize(img_bgr, (canon_w, canon_h), interpolation=cv2.INTER_CUBIC)
 
-    # Letterbox / Pillarbox on white canvas
-    canvas = np.full((CANONICAL_HEIGHT, CANONICAL_WIDTH, 3), 255, dtype=np.uint8)
+    # Letterbox / Pillarbox on white canvas preserving orientation
+    canvas = np.full((canon_h, canon_w, 3), 255, dtype=np.uint8)
     if current_ratio > target_ratio:
-        # Too tall -> scale by height
-        new_w = max(10, int(CANONICAL_HEIGHT / current_ratio))
-        scaled = cv2.resize(img_bgr, (new_w, CANONICAL_HEIGHT), interpolation=cv2.INTER_AREA)
-        offset_x = (CANONICAL_WIDTH - new_w) // 2
+        # Too tall relative to canvas -> scale by height
+        new_w = max(10, int(canon_h / current_ratio))
+        scaled = cv2.resize(img_bgr, (new_w, canon_h), interpolation=cv2.INTER_AREA)
+        offset_x = (canon_w - new_w) // 2
         canvas[:, offset_x : offset_x + new_w] = scaled
     else:
-        # Too wide -> scale by width
-        new_h = max(10, int(CANONICAL_WIDTH * current_ratio))
-        scaled = cv2.resize(img_bgr, (CANONICAL_WIDTH, new_h), interpolation=cv2.INTER_AREA)
-        offset_y = (CANONICAL_HEIGHT - new_h) // 2
+        # Too wide relative to canvas -> scale by width
+        new_h = max(10, int(canon_w * current_ratio))
+        scaled = cv2.resize(img_bgr, (canon_w, new_h), interpolation=cv2.INTER_AREA)
+        offset_y = (canon_h - new_h) // 2
         canvas[offset_y : offset_y + new_h, :] = scaled
 
     return canvas

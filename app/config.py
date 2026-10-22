@@ -1,6 +1,6 @@
 """Runtime configuration for the 100% Laptop-Hosted Paper Scanner & AI Grading Hub (v5.1)."""
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import sys
@@ -24,6 +24,35 @@ def _env_str(name: str, default: str = "") -> str:
     if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
         val = val[1:-1].strip()
     return val
+
+
+def _get_anthropic_api_key() -> str:
+    """Retrieve Anthropic API key from env, direct .env file, or ~/.claude.json fallback."""
+    key = _env_str("ANTHROPIC_API_KEY")
+    if key and not key.startswith("sk-ant-test"):
+        return key
+    try:
+        env_p = Path(__file__).resolve().parent.parent / ".env"
+        if env_p.is_file():
+            for line in env_p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val and not val.startswith("sk-ant-test"):
+                        return val
+    except Exception:
+        pass
+    try:
+        claude_path = Path.home() / ".claude.json"
+        if claude_path.is_file():
+            import json
+            data = json.loads(claude_path.read_text(encoding="utf-8"))
+            candidate = data.get("primaryApiKey") or ""
+            if candidate and str(candidate).startswith("sk-ant-"):
+                return str(candidate).strip()
+    except Exception:
+        pass
+    return key
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -103,7 +132,7 @@ class Settings:
     enable_function_driver_synthesis: bool = _env_bool("ENABLE_FUNCTION_DRIVER_SYNTHESIS", True)
 
     # ---- LLM (Primary 4-way evaluator using Claude Haiku 5.5 + Ephemeral Prompt Caching)
-    anthropic_api_key: str = _env_str("ANTHROPIC_API_KEY")
+    anthropic_api_key: str = field(default_factory=_get_anthropic_api_key)
     primary_model: str = _env_str("ANTHROPIC_MODEL", "claude-haiku-5-5")
     fallback_model: str = _env_str("FALLBACK_MODEL", "claude-haiku-5-5")
     llm_enabled: bool = _env_bool("LLM_ENABLED", True)
@@ -112,7 +141,7 @@ class Settings:
     llm_vision_batch_size: int = _env_int("LLM_VISION_BATCH_SIZE", 2)
     llm_concurrency: int = _env_int("LLM_CONCURRENCY", _DEFAULT_LLM_CONCURRENCY)
     llm_timeout_seconds: float = _env_float("LLM_TIMEOUT_SECONDS", 75.0)
-    llm_max_retries: int = _env_int("LLM_MAX_RETRIES", 2)
+    llm_max_retries: int = _env_int("LLM_MAX_RETRIES", 3)
     auto_approve_confidence_threshold: float = _env_float("AUTO_APPROVE_CONFIDENCE", 0.85)
     auto_approve_legibility_threshold: float = _env_float("AUTO_APPROVE_LEGIBILITY", 0.75)
 
@@ -126,7 +155,7 @@ class Settings:
 
     # ---- Paper Redundancies & Edge Case Engine
     paper_blank_ink_threshold: float = _env_float("PAPER_BLANK_INK_THRESHOLD", 0.0045)
-    paper_auto_rotate: bool = _env_bool("PAPER_AUTO_ROTATE", True)
+    paper_auto_rotate: bool = _env_bool("PAPER_AUTO_ROTATE", False)
     paper_blur_threshold: float = _env_float("PAPER_BLUR_THRESHOLD", 60.0)
     enable_blank_page_detector: bool = _env_bool("ENABLE_BLANK_PAGE_DETECTOR", False)
 

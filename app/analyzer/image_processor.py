@@ -105,10 +105,14 @@ def _order_quad_points(pts: np.ndarray) -> np.ndarray:
 def detect_and_flatten_page(img_bgr: np.ndarray) -> Tuple[np.ndarray, bool]:
     """Detect paper quad boundaries and warp perspective to canonical A4 dimensions.
 
-    If the image is already pre-cropped or fills the frame (>75% area without clear background border),
-    resizes cleanly to canonical A4 dimensions without destructive warping.
+    Preserves original scan orientation: if input is landscape (w > h), warps to landscape A4.
+    If input is portrait (h >= w), warps to portrait A4.
     """
     h, w = img_bgr.shape[:2]
+    is_landscape = w > h
+    canon_w = CANONICAL_HEIGHT if is_landscape else CANONICAL_WIDTH
+    canon_h = CANONICAL_WIDTH if is_landscape else CANONICAL_HEIGHT
+
     scale = 600.0 / max(h, w)
     small = cv2.resize(img_bgr, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -132,12 +136,12 @@ def detect_and_flatten_page(img_bgr: np.ndarray) -> Tuple[np.ndarray, bool]:
             rect = _order_quad_points(pts)
             dst = np.array([
                 [0, 0],
-                [CANONICAL_WIDTH - 1, 0],
-                [CANONICAL_WIDTH - 1, CANONICAL_HEIGHT - 1],
-                [0, CANONICAL_HEIGHT - 1],
+                [canon_w - 1, 0],
+                [canon_w - 1, canon_h - 1],
+                [0, canon_h - 1],
             ], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
-            warped = cv2.warpPerspective(img_bgr, M, (CANONICAL_WIDTH, CANONICAL_HEIGHT), flags=cv2.INTER_CUBIC)
+            warped = cv2.warpPerspective(img_bgr, M, (canon_w, canon_h), flags=cv2.INTER_CUBIC)
             return warped, True
 
     # Fallback: clean aspect-ratio preserving fit onto canonical canvas
@@ -209,7 +213,7 @@ def split_page_into_halves(img_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]
 
 
 def process_and_save_page(raw_path: Path, processed_path: Path) -> Dict[str, Any]:
-    """Read raw uploaded photo, flatten perspective cleanly, auto-correct orientation, sharpen, save page & 2 halves."""
+    """Read raw uploaded photo, flatten perspective cleanly, preserve original orientation, sharpen, save page & 2 halves."""
     img = cv2.imread(str(raw_path))
     if img is None:
         raise ValueError(f"Could not decode uploaded image at {raw_path}")
@@ -217,8 +221,13 @@ def process_and_save_page(raw_path: Path, processed_path: Path) -> Dict[str, Any
     # Edge Case Redundancy 12: Perspective flattening runs first to eliminate desk borders
     flattened, was_warped = detect_and_flatten_page(img)
 
-    # Edge Case Redundancy 8 & 9: Auto-detect upside down / sideways orientation on flattened sheet
-    oriented_img, rot_deg = detect_and_fix_orientation(flattened)
+    # Edge Case Redundancy 8 & 9: Only run orientation auto-flip if paper_auto_rotate is explicitly enabled.
+    # Otherwise strictly preserve original capture orientation.
+    rot_deg = 0
+    if getattr(settings, "paper_auto_rotate", False):
+        oriented_img, rot_deg = detect_and_fix_orientation(flattened)
+    else:
+        oriented_img = flattened
 
     blur_score, is_sharp = compute_blur_score(oriented_img)
     sharpened = normalize_and_sharpen_handwriting(oriented_img)

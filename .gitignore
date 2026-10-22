@@ -52,6 +52,7 @@ scripts/polyglot_benchmark.py
 
 # Node / frontend build
 node_modules/
+demo ui/
 
 # Operating System and IDE files
 .DS_Store

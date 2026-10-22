@@ -299,10 +299,12 @@
               <input id="cfgApiKey" type="password" placeholder="sk-ant-... (leave blank to keep current)" style="width:100%;">
             </div>
 
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
               <button type="button" class="btn btn-sm btn-ghost" id="btnSaveRuntimeSettings">⚙️ Apply AI &amp; Concurrency Settings</button>
+              <button type="button" class="btn btn-sm btn-ghost" id="btnTestAnthropicKey" style="color:var(--brand);border:1px solid var(--border-strong);font-weight:700;">🧪 Test Connection</button>
               <button type="button" class="btn btn-sm btn-ghost" id="btnQuickOpenHaiku">⚡ View Token Telemetry</button>
             </div>
+            <div id="cfgApiKeyTestFeedback" style="margin-top:10px;padding:8px 12px;border-radius:6px;font-size:0.85rem;" hidden></div>
           </div>
 
           <!-- Saved Sessions List -->
@@ -359,6 +361,10 @@
               📸 Take Photo / Upload Sheet <span id="lblSnapPageNo">1</span>
             </label>
             <input id="fallbackCameraInput" type="file" accept="image/*,application/pdf,.pdf" capture="environment" class="visually-hidden">
+
+            <button type="button" class="btn btn-ghost" id="btnCaptureAddExtraPage" style="border:1.5px dashed var(--brand);color:var(--brand);font-weight:700;padding:12px 18px;" title="Scan supplementary extra page for this student">
+              ➕ Extra Page
+            </button>
 
             <label class="btn btn-ghost" for="batchUploadInput" style="border:1.5px solid var(--border-strong);cursor:pointer;padding:12px 18px;" title="Upload all sheet photos or PDFs for the current student">
               📁 Batch Sheets (Single Student)
