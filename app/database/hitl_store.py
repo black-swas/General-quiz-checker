@@ -70,6 +70,29 @@ def ist_now() -> str:
     return datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d %H:%M:%S IST")
 
 
+def parse_timestamp_to_epoch(ts_val: Any) -> float:
+    """Safely parse epoch float, ISO format string, or IST string to unix epoch timestamp."""
+    if isinstance(ts_val, (int, float)):
+        return float(ts_val)
+    if not ts_val or not isinstance(ts_val, str):
+        return 0.0
+    s = ts_val.strip()
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        pass
+    try:
+        clean = s.replace(" IST", "")
+        dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone(timedelta(hours=5, minutes=30))).timestamp()
+    except Exception:
+        pass
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
 def sanitize_ta_text(text: str, max_len: int = 400) -> str:
     """Plain-text only: no control characters, no angle brackets, instruction-like phrases removed."""
     if not text:
@@ -99,9 +122,9 @@ def _db_path() -> Path:
         return _READY[configured]
     target = Path(configured).resolve()
     if not _writable(target):
-        fallback = Path(tempfile.gettempdir()) / "iiserb_hitl_calibration.db"
-        logger.warning("SQLite path %s is not writable; using %s", target, fallback)
-        target = fallback
+        raise PermissionError(
+            f"Configured SQLite database path '{target}' is not writable. Refusing to silently redirect to a temporary database."
+        )
     _READY[configured] = target
     return target
 
@@ -415,42 +438,64 @@ def create_exam_session(
 
 def update_exam_session(session_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
     init_hitl_db()
-    existing = get_exam_session(session_id)
-    if not existing:
-        return None
+    if not updates:
+        return get_exam_session(session_id)
+
     now = ist_now()
-    exam_name = updates.get("exam_name") or existing["exam_name"]
-    course_code = updates.get("course_code") or existing["course_code"]
-    exam_date = updates.get("exam_date") or existing["exam_date"]
-    total_marks = float(updates["total_marks"]) if updates.get("total_marks") is not None else existing["total_marks"]
-    expected_pages = int(updates["expected_pages"]) if updates.get("expected_pages") is not None else existing["expected_pages"]
-    storage_dir = str(updates["storage_dir"]) if updates.get("storage_dir") else existing.get("storage_dir", settings.paper_storage_dir)
-    questions = updates["questions"] if updates.get("questions") is not None else existing["questions"]
-    paper_type = updates.get("paper_type") or existing.get("paper_type", "COMBINED_QUESTION_ANSWER")
-    question_paper_image_path = updates.get("question_paper_image_path") if updates.get("question_paper_image_path") is not None else existing.get("question_paper_image_path", "")
-    status = updates.get("status") or existing["status"]
-    grading_progress = float(updates["grading_progress"]) if updates.get("grading_progress") is not None else existing.get("grading_progress", 0.0)
-    grading_stage = updates.get("grading_stage") or existing.get("grading_stage", "Ready")
-    llm_telemetry = updates["llm_telemetry"] if updates.get("llm_telemetry") is not None else existing.get("llm_telemetry", {})
+    column_map = {
+        "course_code": lambda v: str(v),
+        "exam_name": lambda v: str(v),
+        "exam_date": lambda v: str(v),
+        "total_marks": lambda v: float(v),
+        "expected_pages": lambda v: int(v),
+        "storage_dir": lambda v: str(v),
+        "questions": lambda v: ("questions_json", json.dumps(v)),
+        "paper_type": lambda v: str(v),
+        "question_paper_image_path": lambda v: str(v),
+        "status": lambda v: str(v),
+        "grading_progress": lambda v: float(v),
+        "grading_stage": lambda v: str(v),
+        "llm_telemetry": lambda v: ("llm_telemetry_json", json.dumps(v)),
+    }
 
     with _LOCK:
         conn = _connect()
         try:
-            conn.execute(
-                """
-                UPDATE exam_sessions
-                SET course_code=?, exam_name=?, exam_date=?, total_marks=?, expected_pages=?, storage_dir=?,
-                    questions_json=?, status=?, grading_progress=?, grading_stage=?, llm_telemetry_json=?,
-                    paper_type=?, question_paper_image_path=?, updated_at=?
-                WHERE session_id=?
-                """,
-                (course_code, exam_name, exam_date, total_marks, expected_pages, storage_dir,
-                 json.dumps(questions), status, grading_progress, grading_stage, json.dumps(llm_telemetry),
-                 paper_type, question_paper_image_path, now, session_id),
-            )
+            row = conn.execute("SELECT session_id FROM exam_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if not row:
+                return None
+
+            set_clauses: List[str] = []
+            params: List[Any] = []
+
+            for k, val in updates.items():
+                if val is None and k not in ("question_paper_image_path",):
+                    continue
+                if k in column_map:
+                    mapped = column_map[k](val)
+                    if isinstance(mapped, tuple):
+                        col_name, db_val = mapped
+                    else:
+                        col_name, db_val = k, mapped
+                    set_clauses.append(f"{col_name}=?")
+                    params.append(db_val)
+                elif k in ("questions_json", "llm_telemetry_json"):
+                    set_clauses.append(f"{k}=?")
+                    params.append(json.dumps(val) if not isinstance(val, str) else val)
+
+            if not set_clauses:
+                return get_exam_session(session_id)
+
+            set_clauses.append("updated_at=?")
+            params.append(now)
+            params.append(session_id)
+
+            sql = f"UPDATE exam_sessions SET {', '.join(set_clauses)} WHERE session_id=?"
+            conn.execute(sql, tuple(params))
             conn.commit()
         finally:
             conn.close()
+
     return get_exam_session(session_id)
 
 
@@ -467,6 +512,8 @@ def delete_exam_session(session_id: str) -> bool:
             conn.execute("DELETE FROM question_evaluations WHERE session_id=?", (clean_sid,))
             conn.execute("DELETE FROM scanned_pages WHERE session_id=?", (clean_sid,))
             conn.execute("DELETE FROM session_students WHERE session_id=?", (clean_sid,))
+            conn.execute("DELETE FROM regrade_requests WHERE session_id=?", (clean_sid,))
+            conn.execute("DELETE FROM page_upload_chunks WHERE session_id=?", (clean_sid,))
             cur = conn.execute("DELETE FROM exam_sessions WHERE session_id=?", (clean_sid,))
             conn.commit()
             deleted = cur.rowcount > 0
@@ -519,14 +566,16 @@ def list_exam_sessions(limit: int = 50) -> List[Dict[str, Any]]:
             ).fetchall()
             if not rows:
                 return []
+            sids = [r["session_id"] for r in rows]
+            placeholders = ",".join("?" for _ in sids)
             st_counts = {r[0]: r[1] for r in conn.execute(
-                "SELECT session_id, COUNT(*) FROM session_students GROUP BY session_id"
+                f"SELECT session_id, COUNT(*) FROM session_students WHERE session_id IN ({placeholders}) GROUP BY session_id", sids
             ).fetchall()}
             pg_counts = {r[0]: r[1] for r in conn.execute(
-                "SELECT session_id, COUNT(*) FROM scanned_pages GROUP BY session_id"
+                f"SELECT session_id, COUNT(*) FROM scanned_pages WHERE session_id IN ({placeholders}) GROUP BY session_id", sids
             ).fetchall()}
             ev_rows = conn.execute(
-                "SELECT session_id, verdict_tab, COUNT(*) as c FROM question_evaluations GROUP BY session_id, verdict_tab"
+                f"SELECT session_id, verdict_tab, COUNT(*) as c FROM question_evaluations WHERE session_id IN ({placeholders}) GROUP BY session_id, verdict_tab", sids
             ).fetchall()
             tab_counts_by_sid: Dict[str, Dict[str, int]] = {}
             for er in ev_rows:
@@ -633,7 +682,7 @@ def get_exam_session(session_id: str) -> Optional[Dict[str, Any]]:
             summary_counts[tab] += 1
         if e.get("auto_approved"):
             summary_counts["AUTO_APPROVED"] += 1
-        if e.get("ta_status") in ("TA_APPROVED", "TA_OVERRIDDEN"):
+        if e.get("ta_status") in ("TA_APPROVED", "TA_OVERRIDDEN", "OVERRIDDEN"):
             summary_counts["TA_REVIEWED"] += 1
         evals_by_student.setdefault(e["roll_no"], {})[e["question_id"]] = e
         clean_e_roll = str(e["roll_no"]).strip().casefold()
@@ -738,15 +787,17 @@ def upsert_session_student(session_id: str, roll_no: str, student_name: str = ""
         conn = _connect()
         try:
             existing = conn.execute(
-                "SELECT * FROM session_students WHERE session_id=? AND roll_no=?", (session_id, clean_roll)
+                "SELECT * FROM session_students WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)",
+                (session_id, clean_roll, clean_roll),
             ).fetchone()
             if existing:
+                matched_roll = existing["roll_no"]
                 new_name = clean_name if clean_name else existing["student_name"]
                 new_fin = int(finalized) if finalized is not None else existing["finalized"]
                 new_stat = grading_status if grading_status is not None else existing["grading_status"]
                 conn.execute(
                     "UPDATE session_students SET student_name=?, finalized=?, grading_status=?, updated_at=? WHERE session_id=? AND roll_no=?",
-                    (new_name, new_fin, new_stat, now, session_id, clean_roll),
+                    (new_name, new_fin, new_stat, now, session_id, matched_roll),
                 )
             else:
                 conn.execute(
@@ -756,7 +807,7 @@ def upsert_session_student(session_id: str, roll_no: str, student_name: str = ""
                 )
             conn.execute("UPDATE exam_sessions SET updated_at=? WHERE session_id=?", (now, session_id))
             conn.commit()
-            row = conn.execute("SELECT * FROM session_students WHERE session_id=? AND roll_no=?", (session_id, clean_roll)).fetchone()
+            row = conn.execute("SELECT * FROM session_students WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)", (session_id, clean_roll, clean_roll)).fetchone()
             return dict(row) if row else {}
         finally:
             conn.close()
@@ -771,6 +822,8 @@ def delete_session_student(session_id: str, roll_no: str) -> bool:
         try:
             conn.execute("DELETE FROM question_evaluations WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
             conn.execute("DELETE FROM scanned_pages WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
+            conn.execute("DELETE FROM page_upload_chunks WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
+            conn.execute("DELETE FROM regrade_requests WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
             cur = conn.execute("DELETE FROM session_students WHERE session_id=? AND roll_no=? COLLATE NOCASE", (session_id, clean_roll))
             conn.execute("UPDATE exam_sessions SET updated_at=? WHERE session_id=?", (now, session_id))
             conn.commit()
@@ -903,18 +956,20 @@ def save_question_evaluation(
         conn = _connect()
         try:
             existing = conn.execute(
-                "SELECT ta_status, ta_final_marks, ta_comment FROM question_evaluations WHERE eval_id=?",
-                (eval_id,)
+                "SELECT eval_id, roll_no, ta_status, ta_final_marks, ta_comment, verdict_tab FROM question_evaluations WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE) AND (question_id=? OR question_id=? COLLATE NOCASE)",
+                (session_id, clean_roll, clean_roll, question_id, question_id)
             ).fetchone()
-            if not existing:
-                existing = conn.execute(
-                    "SELECT ta_status, ta_final_marks, ta_comment FROM question_evaluations WHERE session_id=? AND roll_no=? COLLATE NOCASE AND question_id=? COLLATE NOCASE",
-                    (session_id, clean_roll, question_id)
-                ).fetchone()
-            if existing and existing["ta_status"] in ("TA_APPROVED", "TA_OVERRIDDEN"):
-                ta_status = existing["ta_status"]
-                ta_final_marks = existing["ta_final_marks"]
-                ta_comment = existing["ta_comment"]
+            if existing:
+                eval_id = existing["eval_id"]
+                clean_roll = existing["roll_no"]
+                if existing["ta_status"] in ("TA_APPROVED", "TA_OVERRIDDEN", "OVERRIDDEN"):
+                    ta_status = "TA_OVERRIDDEN" if existing["ta_status"] == "OVERRIDDEN" else existing["ta_status"]
+                    ta_final_marks = existing["ta_final_marks"]
+                    ta_comment = existing["ta_comment"]
+                    if existing["verdict_tab"]:
+                        verdict_tab = existing["verdict_tab"]
+                else:
+                    ta_comment = ""
             else:
                 ta_comment = ""
 
@@ -969,14 +1024,50 @@ def apply_ta_grade_override(
                 if row:
                     eval_id = row["eval_id"]
             if not row:
-                return None
+                st_row = conn.execute(
+                    "SELECT student_name FROM session_students WHERE session_id=? AND (roll_no=? OR roll_no=? COLLATE NOCASE)",
+                    (session_id, roll_no.strip(), roll_no.strip()),
+                ).fetchone()
+                student_name = st_row["student_name"] if st_row else ""
+                max_m = 5.0
+                sess_row = conn.execute("SELECT questions_json FROM exam_sessions WHERE session_id=?", (session_id,)).fetchone()
+                if sess_row and sess_row["questions_json"]:
+                    try:
+                        q_specs = json.loads(sess_row["questions_json"])
+                        for q in q_specs:
+                            if str(q.get("question_id", "")).strip().upper() == str(question_id).strip().upper():
+                                max_m = float(q.get("max_marks", 5.0))
+                                break
+                    except Exception:
+                        pass
+                clamped_marks = round(max(0.0, min(max_m, float(awarded_marks))), 2)
+                conn.execute(
+                    """
+                    INSERT INTO question_evaluations
+                    (eval_id, session_id, roll_no, student_name, question_id, crop_path, ocr_transcription,
+                     legibility_score, ai_awarded_marks, max_marks, step_scores_json, confidence,
+                     verdict_tab, anomaly_flag, ai_comment, auto_approved, ta_status, ta_final_marks, ta_comment, question_text, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        eval_id, session_id, roll_no.strip(), student_name, question_id, "", "",
+                        1.0, 0.0, max_m, "[]", 1.0,
+                        verdict_tab, "NONE", "", 0, ta_status, clamped_marks, clean_comment, "", now,
+                    ),
+                )
+                conn.commit()
+                created = conn.execute("SELECT * FROM question_evaluations WHERE eval_id=?", (eval_id,)).fetchone()
+                return dict(created) if created else None
+            max_m = float(row["max_marks"] or 5.0)
+            clamped_marks = round(max(0.0, min(max_m, float(awarded_marks))), 2)
+            effective_status = ta_status
             conn.execute(
                 """
                 UPDATE question_evaluations
                 SET ta_status=?, ta_final_marks=?, verdict_tab=?, ta_comment=?, updated_at=?
                 WHERE eval_id=?
                 """,
-                (ta_status, round(float(awarded_marks), 2), verdict_tab, clean_comment, now, eval_id),
+                (effective_status, clamped_marks, verdict_tab, clean_comment, now, eval_id),
             )
             conn.commit()
             updated = conn.execute("SELECT * FROM question_evaluations WHERE eval_id=?", (eval_id,)).fetchone()
@@ -1239,7 +1330,7 @@ def claim_next_student(
                 SELECT DISTINCT s.roll_no, s.student_name, s.claimed_by, s.claimed_at,
                                 e.verdict_tab, e.ta_status
                 FROM session_students s
-                JOIN question_evaluations e ON s.session_id = e.session_id AND s.roll_no = e.roll_no
+                JOIN question_evaluations e ON s.session_id = e.session_id AND (s.roll_no = e.roll_no OR s.roll_no = e.roll_no COLLATE NOCASE)
                 WHERE s.session_id = ?
                   AND e.ta_status = 'PENDING'
             """
@@ -1262,12 +1353,9 @@ def claim_next_student(
                 c_at = r["claimed_at"] or ""
                 is_claimed_active = False
                 if c_by and c_by != ta_id and c_at:
-                    try:
-                        c_ts = datetime.fromisoformat(c_at).timestamp()
-                        if c_ts > expire_threshold:
-                            is_claimed_active = True
-                    except Exception:
-                        pass
+                    c_ts = parse_timestamp_to_epoch(c_at)
+                    if c_ts > expire_threshold:
+                        is_claimed_active = True
 
                 if not is_claimed_active:
                     eligible.append(r)
@@ -1281,8 +1369,8 @@ def claim_next_student(
 
             # Claim the student
             conn.execute(
-                "UPDATE session_students SET claimed_by = ?, claimed_at = ? WHERE session_id = ? AND roll_no = ?",
-                (ta_id, now_iso, session_id, target_roll),
+                "UPDATE session_students SET claimed_by = ?, claimed_at = ? WHERE session_id = ? AND (roll_no = ? OR roll_no = ? COLLATE NOCASE)",
+                (ta_id, now_iso, session_id, target_roll, target_roll),
             )
             conn.commit()
 
@@ -1328,8 +1416,14 @@ def record_student_presence(session_id: str, roll_no: str, ta_id: str) -> bool:
         conn = _connect()
         try:
             cur = conn.execute(
-                "UPDATE session_students SET claimed_by = ?, claimed_at = ? WHERE session_id = ? AND (roll_no = ? OR roll_no = ? COLLATE NOCASE)",
-                (ta_id, now_iso, session_id, clean_roll, clean_roll),
+                """
+                UPDATE session_students
+                SET claimed_by = ?, claimed_at = ?
+                WHERE session_id = ?
+                  AND (roll_no = ? OR roll_no = ? COLLATE NOCASE)
+                  AND (claimed_by = ? OR claimed_by = '' OR claimed_by IS NULL)
+                """,
+                (ta_id, now_iso, session_id, clean_roll, clean_roll, ta_id),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1364,7 +1458,11 @@ def get_exam_analytics(session_id: str) -> Dict[str, Any]:
 
     total_scores_sorted = sorted(total_scores)
     mean_val = round(sum(total_scores) / n_students, 2)
-    median_val = round(total_scores_sorted[n_students // 2], 2)
+    if n_students % 2 == 1:
+        median_val = round(total_scores_sorted[n_students // 2], 2)
+    else:
+        mid = n_students // 2
+        median_val = round((total_scores_sorted[mid - 1] + total_scores_sorted[mid]) / 2.0, 2)
     variance = sum((x - mean_val) ** 2 for x in total_scores) / n_students
     std_dev_val = round(variance ** 0.5, 2)
     min_val = round(total_scores_sorted[0], 2)
@@ -1386,7 +1484,8 @@ def get_exam_analytics(session_id: str) -> Dict[str, Any]:
         bottom_scores: List[float] = []
 
         for s in students:
-            ev = s.get("evaluations", {}).get(qid, {})
+            evals_dict = s.get("evaluations", {})
+            ev = evals_dict.get(qid) or evals_dict.get(str(qid).upper()) or evals_dict.get(str(qid).lower()) or {}
             score = float(ev.get("final_marks", ev.get("ai_awarded_marks", 0.0)) or 0.0)
             q_scores.append(score)
             if s["roll_no"] in top_students:
@@ -1485,6 +1584,7 @@ def resolve_regrade_request(
     status: str,
     ta_response: str = "",
     granted_marks: Optional[float] = None,
+    session_id: Optional[str] = None,
 ) -> bool:
     """Resolves a student regrade request with ACCEPTED or REJECTED status, and updates question evaluations if accepted."""
     init_hitl_db()
@@ -1495,6 +1595,8 @@ def resolve_regrade_request(
         try:
             req_row = conn.execute("SELECT * FROM regrade_requests WHERE id = ?", (request_id,)).fetchone()
             if not req_row:
+                return False
+            if session_id and req_row["session_id"] != session_id:
                 return False
             cur = conn.execute(
                 """

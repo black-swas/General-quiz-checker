@@ -52,7 +52,8 @@ def build_session_excel_bytes(session_data: Dict[str, Any]) -> bytes:
 
     questions: List[Dict[str, Any]] = session_data.get("questions") or []
     q_ids = [str(q.get("question_id", f"Q{i+1}")) for i, q in enumerate(questions)]
-    total_max = float(session_data.get("total_marks") or sum(float(q.get("max_marks", 5.0)) for q in questions) or 100.0)
+    sum_q_max = sum(float(q.get("max_marks", 5.0)) for q in questions)
+    total_max = round(sum_q_max if sum_q_max > 0 else float(session_data.get("total_marks") or 100.0), 2)
 
     # ---- Headers on Sheet 1 ----
     summary_headers = [
@@ -121,10 +122,11 @@ def build_session_excel_bytes(session_data: Dict[str, Any]) -> bytes:
         pages_cnt = int(student.get("pages_uploaded", 0))
         evals: Dict[str, Dict[str, Any]] = student.get("evaluations") or {}
 
-        q_marks_list: List[float] = []
+        q_marks_list: List[Any] = []
         comments_list: List[str] = []
         overall_tab = str(student.get("overall_tab", "GRAY"))
         all_approved = True
+        has_unevaluated = False
 
         for q in questions:
             qid = str(q.get("question_id", "Q1"))
@@ -163,13 +165,50 @@ def build_session_excel_bytes(session_data: Dict[str, Any]) -> bytes:
                         dc.fill = green_fill if v == "GREEN" else (red_fill if v == "RED" else (blue_fill if v == "BLUE" else gray_fill))
                 detail_row_idx += 1
             else:
-                q_marks_list.append(0.0)
+                q_marks_list.append("-")
                 all_approved = False
+                has_unevaluated = True
+                d_vals = [
+                    _safe_excel_cell(roll_no),
+                    _safe_excel_cell(student_name),
+                    qid,
+                    _safe_excel_cell(q.get("title", "")),
+                    "-",
+                    q_max,
+                    0.0,
+                    1.0,
+                    "UNGRADED",
+                    "PENDING",
+                    "Unevaluated / Pending Grading",
+                    "",
+                ]
+                for c_i, v in enumerate(d_vals, start=1):
+                    dc = ws_detail.cell(row=detail_row_idx, column=c_i, value=v)
+                    dc.font = body_font
+                    dc.border = cell_border
+                    if c_i == 9:
+                        dc.fill = gray_fill
+                detail_row_idx += 1
 
-        total_awarded = round(sum(q_marks_list), 2)
-        pct = round((100.0 * total_awarded) / max(1.0, total_max), 2)
-        review_state = "Approved" if (evals and all_approved) else ("Needs TA Review" if overall_tab == "RED" else "Pending")
-        combined_comment = " | ".join(comments_list) if comments_list else " Clean evaluation."
+        evaluated_marks = [m for m in q_marks_list if isinstance(m, (int, float))]
+        if evaluated_marks:
+            total_awarded = round(sum(evaluated_marks), 2)
+            pct = round((100.0 * total_awarded) / max(1.0, total_max), 2)
+        else:
+            total_awarded = 0.0 if not has_unevaluated else "-"
+            pct = 0.0 if not has_unevaluated else "-"
+
+        if not evals:
+            review_state = "Pending Grading"
+        elif has_unevaluated:
+            review_state = "Grading In Progress"
+        elif all_approved:
+            review_state = "Approved"
+        elif overall_tab == "RED":
+            review_state = "Needs TA Review"
+        else:
+            review_state = "Pending"
+        combined_comment = " | ".join(comments_list) if comments_list else ("Grading in progress." if has_unevaluated else " Clean evaluation.")
 
         row_values = [
             _safe_excel_cell(roll_no),
@@ -187,7 +226,10 @@ def build_session_excel_bytes(session_data: Dict[str, Any]) -> bytes:
             cell = ws_summary.cell(row=s_idx, column=c_i, value=val)
             cell.font = bold_font if c_i in (1, len(row_values) - 5) else body_font
             cell.border = cell_border
-            if isinstance(val, (int, float)) and c_i >= 3:
+            if val == "-":
+                cell.fill = gray_fill
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif isinstance(val, (int, float)) and c_i >= 3:
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="center")

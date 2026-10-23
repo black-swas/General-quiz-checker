@@ -494,16 +494,56 @@ def reorder_and_audit_scanned_pages(
     scanned_pages: List[Dict[str, Any]],
     expected_page_count: int,
 ) -> Tuple[List[Dict[str, Any]], List[int], List[str]]:
-    """Sort pages by page number, detect missing pages, and flag duplicates.
+    """Sort pages by page number, detect missing pages, and flag/deduplicate duplicates.
 
     Returns:
         (ordered_pages, missing_page_numbers, audit_warnings)
     """
-    sorted_pages = sorted(scanned_pages, key=lambda p: int(p.get("page_no", 1)))
-    present_page_nos = {int(p.get("page_no", 1)) for p in sorted_pages}
-    missing_pages: List[int] = []
     warnings: List[str] = []
+    
+    # 1. Group pages by page number and detect duplicate scans of the same page number
+    pages_by_num: Dict[int, List[Dict[str, Any]]] = {}
+    for p in scanned_pages:
+        try:
+            p_no = int(p.get("page_no", 1))
+        except (ValueError, TypeError):
+            p_no = 1
+        pages_by_num.setdefault(p_no, []).append(p)
 
+    deduped_pages: List[Dict[str, Any]] = []
+    for p_no in sorted(pages_by_num.keys()):
+        p_list = pages_by_num[p_no]
+        if len(p_list) > 1:
+            # Sort by sharpness/blur_score descending if available
+            p_list_sorted = sorted(
+                p_list,
+                key=lambda x: float(x.get("blur_score", 0.0) or 0.0),
+                reverse=True,
+            )
+            chosen = p_list_sorted[0]
+            warnings.append(
+                f"Duplicate scans detected for Page {p_no} ({len(p_list)} copies); retained best quality scan."
+            )
+            deduped_pages.append(chosen)
+        else:
+            deduped_pages.append(p_list[0])
+
+    # 2. Check for identical frames across distinct page numbers (e.g. perceptual hash / sha256)
+    for i in range(len(deduped_pages)):
+        for j in range(i + 1, len(deduped_pages)):
+            p_a = deduped_pages[i]
+            p_b = deduped_pages[j]
+            h_a = p_a.get("p_hash") or p_a.get("phash") or p_a.get("sha256")
+            h_b = p_b.get("p_hash") or p_b.get("phash") or p_b.get("sha256")
+            if h_a and h_b:
+                if str(h_a) == str(h_b) or is_duplicate_scan_frame(str(h_a), str(h_b)):
+                    warnings.append(
+                        f"Duplicate frame detected: Page {p_a.get('page_no')} and Page {p_b.get('page_no')} have identical image content."
+                    )
+
+    # 3. Missing pages check
+    present_page_nos = {int(p.get("page_no", 1)) for p in deduped_pages}
+    missing_pages: List[int] = []
     for expected_no in range(1, expected_page_count + 1):
         if expected_no not in present_page_nos:
             missing_pages.append(expected_no)
@@ -511,7 +551,7 @@ def reorder_and_audit_scanned_pages(
     if missing_pages:
         warnings.append(f"Missing page(s): {', '.join(str(p) for p in missing_pages)} (Expected 1..{expected_page_count}).")
 
-    return sorted_pages, missing_pages, warnings
+    return deduped_pages, missing_pages, warnings
 
 
 # ---------------------------------------------------------------------------

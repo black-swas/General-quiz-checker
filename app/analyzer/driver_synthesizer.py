@@ -108,11 +108,17 @@ if __name__ == "__main__":
             else:
                 _args = [_raw]
 
+    import inspect
+    import asyncio
     try:
         _res = _target(*_args[:_num_params]) if _num_params > 0 else _target()
+        if inspect.iscoroutine(_res):
+            _res = asyncio.run(_res)
     except TypeError:
         # Fallback: pass single input string if signature mismatched
         _res = _target(_raw) if _num_params == 1 else None
+        if inspect.iscoroutine(_res):
+            _res = asyncio.run(_res)
 
     if _res is not None:
         if isinstance(_res, (list, dict, tuple)):
@@ -152,22 +158,40 @@ def _synthesize_cpp_c_driver(raw_code: str, language: str = "cpp") -> Optional[s
     param_vars = []
     cpp_inputs = []
     for i, p in enumerate(param_list):
-        p_clean = re.sub(r"const\s+|\s*&\s*", " ", p).strip()
+        # Strip C++ default argument: e.g. "int x = 10" -> "int x"
+        p_clean = re.sub(r"\s*=.*$", "", p).strip()
+        p_clean = re.sub(r"const\s+|\s*&\s*", " ", p_clean).strip()
         parts = p_clean.split()
         if len(parts) >= 2:
-            p_type, p_name = " ".join(parts[:-1]), parts[-1].lstrip("*")
+            p_type, p_name = " ".join(parts[:-1]), parts[-1]
         elif len(parts) == 1:
             p_type, p_name = parts[0], f"arg_{i}"
         else:
             return None
+        is_ptr = "*" in p_clean
+        p_type = p_type.replace("*", "").strip()
+        p_name = p_name.replace("*", "").strip()
+        if is_ptr:
+            p_type = f"{p_type}*"
         param_vars.append((p_type, p_name))
         cpp_inputs.append(p_name)
 
     args_call = ", ".join(name for _, name in param_vars)
 
     if language in ("cpp", "c++"):
-        declarations = "\n    ".join(f"{pt} {pn}{{}};" for pt, pn in param_vars)
-        reads = " >> ".join(["std::cin"] + cpp_inputs) + ";" if cpp_inputs else ""
+        declarations_list = []
+        cin_inputs = []
+        for pt, pn in param_vars:
+            if "*" in pt:
+                base_type = pt.replace("*", "").strip()
+                declarations_list.append(f"{base_type} _val_{pn}{{}}; {base_type}* {pn} = &_val_{pn};")
+                cin_inputs.append(f"_val_{pn}")
+            else:
+                declarations_list.append(f"{pt} {pn}{{}};")
+                cin_inputs.append(pn)
+
+        declarations = "\n    ".join(declarations_list)
+        reads = " >> ".join(["std::cin"] + cin_inputs) + ";" if cin_inputs else ""
         if ret_type == "void":
             print_block = f"""    {func_name}({args_call});"""
         elif "vector" in ret_type:
@@ -196,26 +220,34 @@ int main() {{
 """
         return raw_code + "\n" + harness
     else:
-        # C driver (supports basic ints/floats/void)
+        # C driver (supports basic ints/floats/pointers/void)
         decl_lines = []
         fmt_parts = []
-        amp_vars = []
+        scan_args = []
         for pt, pn in param_vars:
-            decl_lines.append(f"{pt} {pn} = 0;")
-            if "long long" in pt:
-                fmt_parts.append("%lld")
-            elif "double" in pt:
-                fmt_parts.append("%lf")
-            elif "float" in pt:
-                fmt_parts.append("%f")
+            is_ptr = "*" in pt
+            base_type = pt.replace("*", "").strip()
+            if "long long" in base_type:
+                fmt = "%lld"
+            elif "double" in base_type:
+                fmt = "%lf"
+            elif "float" in base_type:
+                fmt = "%f"
             else:
-                fmt_parts.append("%d")
-            amp_vars.append(f"&{pn}")
+                fmt = "%d"
+            fmt_parts.append(fmt)
+
+            if is_ptr:
+                decl_lines.append(f"{base_type} _val_{pn} = 0; {base_type}* {pn} = &_val_{pn};")
+                scan_args.append(pn)
+            else:
+                decl_lines.append(f"{base_type} {pn} = 0;")
+                scan_args.append(f"&{pn}")
 
         scan_fmt = " ".join(fmt_parts)
-        scan_args = ", ".join(amp_vars)
+        scan_args_str = ", ".join(scan_args)
         decls = "\n    ".join(decl_lines)
-        scan_stmt = f'scanf("{scan_fmt}", {scan_args});' if amp_vars else ""
+        scan_stmt = f'scanf("{scan_fmt}", {scan_args_str});' if scan_args else ""
 
         if ret_type == "void":
             call_stmt = f"    {func_name}({args_call});"
@@ -256,7 +288,7 @@ def _synthesize_js_driver(raw_code: str) -> Optional[str]:
 // ---------------------------------------------------------------------------
 // Auto-synthesized test driver for function-only JavaScript submission
 // ---------------------------------------------------------------------------
-(() => {{
+(async () => {{
     const fs = require('fs');
     let raw = '';
     try {{ raw = fs.readFileSync(0, 'utf-8').trim(); }} catch(e) {{}}
@@ -284,7 +316,7 @@ def _synthesize_js_driver(raw_code: str) -> Optional[str]:
         }}
     }}
     try {{
-        const res = typeof {fn_name} === 'function' ? {fn_name}(...args.slice(0, numParams)) : undefined;
+        const res = typeof {fn_name} === 'function' ? await {fn_name}(...args.slice(0, numParams)) : undefined;
         if (res !== undefined) {{
             if (typeof res === 'object' && res !== null) console.log(JSON.stringify(res));
             else console.log(res);
@@ -292,7 +324,7 @@ def _synthesize_js_driver(raw_code: str) -> Optional[str]:
     }} catch(err) {{
         console.error(err);
     }}
-}})();
+}})().catch(err => console.error(err));
 """
     return raw_code + "\n" + harness
 

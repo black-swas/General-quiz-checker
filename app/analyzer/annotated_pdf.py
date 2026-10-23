@@ -9,10 +9,13 @@ flattened exam page scans with:
 """
 
 import io
+import logging
 import os
 import zipfile
 from typing import Any, Dict, List, Optional
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 try:
     from reportlab.lib.colors import HexColor
@@ -32,10 +35,7 @@ def generate_student_feedback_pdf(
     buffer = io.BytesIO()
 
     if not REPORTLAB_AVAILABLE:
-        # Fallback to simple blank PDF if reportlab is unavailable
-        img = Image.new("RGB", (1400, 1980), color="white")
-        img.save(buffer, format="PDF")
-        return buffer.getvalue()
+        raise RuntimeError("reportlab is required for feedback PDF generation. Please install reportlab.")
 
     c = canvas.Canvas(buffer, pagesize=A4)
     page_width, page_height = A4  # 595.27 x 841.89 points
@@ -119,6 +119,31 @@ def generate_student_feedback_pdf(
     y_pos -= 6 * mm
 
     for q in questions:
+        row_h = 7 * mm
+        if y_pos - row_h < margin + 18 * mm:
+            c.setFont("Helvetica-Oblique", 7)
+            c.setFillColor(HexColor("#64748b"))
+            c.drawString(margin, margin + 8 * mm, f"Continued on next page... (Roll No: {roll_no})")
+            c.showPage()
+
+            # Continuation table header
+            y_pos = page_height - margin - 10 * mm
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColor(HexColor("#0f172a"))
+            c.drawString(margin, y_pos, f"QUESTION BREAKDOWN (CONTINUED) — {roll_no}")
+            y_pos -= 6 * mm
+            c.setFillColor(HexColor("#e2e8f0"))
+            c.rect(margin, y_pos - 6 * mm, page_width - 2 * margin, 6 * mm, fill=1, stroke=0)
+            c.setFont("Helvetica-Bold", 8)
+            c.setFillColor(HexColor("#334155"))
+            c.drawString(margin + 3 * mm, y_pos - 4.5 * mm, "QID")
+            c.drawString(margin + 16 * mm, y_pos - 4.5 * mm, "Description")
+            c.drawString(margin + 80 * mm, y_pos - 4.5 * mm, "Max")
+            c.drawString(margin + 94 * mm, y_pos - 4.5 * mm, "Awarded")
+            c.drawString(margin + 114 * mm, y_pos - 4.5 * mm, "Status")
+            c.drawString(margin + 138 * mm, y_pos - 4.5 * mm, "TA / Grader Notes")
+            y_pos -= 6 * mm
+
         qid = q.get("question_id", "Q")
         max_m = float(q.get("max_marks", 5.0))
         ev = evals.get(qid) or evals.get(str(qid).upper()) or evals.get(str(qid).lower()) or {}
@@ -129,7 +154,6 @@ def generate_student_feedback_pdf(
         if len(comment) > 42:
             comment = comment[:39] + "..."
 
-        row_h = 7 * mm
         c.setStrokeColor(HexColor("#e2e8f0"))
         c.line(margin, y_pos - row_h, page_width - margin, y_pos - row_h)
 
@@ -288,6 +312,7 @@ def generate_feedback_zip(
     """Generates a ZIP archive containing annotated feedback PDFs for all students in the session."""
     zip_buffer = io.BytesIO()
     students = session.get("students", [])
+    errors: List[str] = []
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for st in students:
@@ -296,7 +321,13 @@ def generate_feedback_zip(
                 pdf_bytes = generate_student_feedback_pdf(session, st)
                 filename = f"{roll}_Feedback.pdf"
                 zf.writestr(filename, pdf_bytes)
-            except Exception:
-                continue
+            except Exception as e:
+                err_msg = f"Failed to generate feedback PDF for student {roll}: {str(e)}"
+                logger.error(err_msg)
+                errors.append(err_msg)
+                zf.writestr(f"{roll}_ERROR.txt", err_msg)
+
+        if errors:
+            zf.writestr("_EXPORT_ERRORS.txt", "\n".join(errors))
 
     return zip_buffer.getvalue()

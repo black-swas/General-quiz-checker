@@ -28,12 +28,36 @@ try:
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
+ARUCO_AVAILABLE = hasattr(cv2, "aruco") and hasattr(cv2.aruco, "DICT_4X4_50")
 
-def generate_aruco_marker_pil(marker_id: int, size_px: int = 120, dict_type: int = cv2.aruco.DICT_4X4_50) -> Image.Image:
-    """Generates an ArUco marker image as a PIL Image."""
-    aruco_dict = cv2.aruco.getPredefinedDictionary(dict_type)
-    marker_img = cv2.aruco.generateImageMarker(aruco_dict, marker_id, size_px)
-    return Image.fromarray(marker_img)
+
+def generate_aruco_marker_pil(marker_id: int, size_px: int = 120, dict_type: Optional[int] = None) -> Image.Image:
+    """Generates an ArUco marker image as a PIL Image with safe fallback if cv2.aruco is missing."""
+    if ARUCO_AVAILABLE:
+        d_type = dict_type if dict_type is not None else cv2.aruco.DICT_4X4_50
+        aruco_dict = cv2.aruco.getPredefinedDictionary(d_type)
+        marker_img = cv2.aruco.generateImageMarker(aruco_dict, marker_id, size_px)
+        return Image.fromarray(marker_img)
+    
+    # High-contrast fallback marker if cv2.aruco is not available in OpenCV build
+    arr = np.ones((size_px, size_px), dtype=np.uint8) * 255
+    border = max(2, size_px // 8)
+    arr[:border, :] = 0
+    arr[-border:, :] = 0
+    arr[:, :border] = 0
+    arr[:, -border:] = 0
+    # Draw simple ID pattern inside
+    inner = size_px - 2 * border
+    for r in range(4):
+        for c in range(4):
+            bit = (marker_id + r * 4 + c) % 2
+            if bit == 1:
+                r0 = border + (r * inner) // 4
+                r1 = border + ((r + 1) * inner) // 4
+                c0 = border + (c * inner) // 4
+                c1 = border + ((c + 1) * inner) // 4
+                arr[r0:r1, c0:c1] = 0
+    return Image.fromarray(arr)
 
 
 def generate_booklet_pdf(
@@ -190,13 +214,19 @@ def generate_booklet_pdf(
                 x0_pct = float(q.get("x_start_pct", 0.0)) / 100.0
                 x1_pct = float(q.get("x_end_pct", 100.0)) / 100.0
 
-                # Convert percentages to points inside drawable region
-                box_x = margin_x + (x0_pct * drawable_width)
-                box_w = max(40 * mm, (x1_pct - x0_pct) * drawable_width)
-                # Note: ReportLab origin is bottom-left
-                box_top = drawable_top - (y0_pct * drawable_height)
-                box_bottom = drawable_top - (y1_pct * drawable_height)
-                actual_h = max(20 * mm, box_top - box_bottom)
+                # Convert percentages to points on page, aligned with image_processor crop coordinates
+                box_x = max(margin_x, x0_pct * page_width)
+                box_right = min(page_width - margin_x, x1_pct * page_width)
+                box_w = max(40 * mm, box_right - box_x)
+
+                # ReportLab origin is bottom-left, y0_pct is percentage from page top
+                raw_top = page_height * (1.0 - y0_pct)
+                raw_bottom = page_height * (1.0 - y1_pct)
+
+                # Constrain within printable region between header separator and footer/markers
+                box_top = min(drawable_top, max(drawable_bottom + 15 * mm, raw_top))
+                box_bottom = max(drawable_bottom, min(box_top - 15 * mm, raw_bottom))
+                actual_h = max(15 * mm, box_top - box_bottom)
                 actual_bottom = box_top - actual_h
 
                 # Draw Question Box Border
@@ -236,7 +266,4 @@ def generate_booklet_pdf(
         c.save()
         return buffer.getvalue()
     else:
-        # Fallback using Pillow if reportlab is absent
-        img = Image.new("RGB", (1400, 1980), color="white")
-        img.save(buffer, format="PDF")
-        return buffer.getvalue()
+        raise RuntimeError("reportlab is required for booklet PDF generation. Please install reportlab.")

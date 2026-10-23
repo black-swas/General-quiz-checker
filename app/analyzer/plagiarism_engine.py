@@ -270,7 +270,7 @@ def run_question_plagiarism_matrix(
                 sequence_percent=round(seq, 1),
                 exclusive_percent=round(exclusive, 1),
                 cluster_size=csize,
-                near_cluster_size=near_sizes[uf_near.find(a)],
+                near_cluster_size=near_sizes[uf_near.find(me)],
                 strength="STRONG" if strong else "WEAK",
                 matched_lines_self=mine,
                 matched_lines_partner=theirs,

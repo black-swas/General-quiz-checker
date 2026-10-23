@@ -21,11 +21,17 @@ from app.config import settings
 _NUMBER_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\b")
 
 
+COMMON_EXAM_NUMBERS = {
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    "0.0", "1.0", "2.0", "3.0", "4.0", "5.0", "10.0", "100", "100.0", "0.5", "50", "50.0",
+}
+
+
 def extract_numeric_tokens(text: str) -> Set[str]:
     """Extracts non-trivial numbers from an OCR transcription."""
     nums = set(_NUMBER_PATTERN.findall(text))
-    # Filter out trivial numbers like 0, 1, 2
-    return {n for n in nums if n not in {"0", "1", "2", "0.0", "1.0", "2.0"}}
+    # Filter out trivial and ubiquitous small numbers
+    return {n for n in nums if n not in COMMON_EXAM_NUMBERS and (len(n) > 1 or "." in n)}
 
 
 def run_paper_exam_plagiarism(
@@ -75,7 +81,10 @@ def run_paper_exam_plagiarism(
 
                 for roll, matches in clone_map.items():
                     for m in matches:
-                        pair = tuple(sorted([roll, m.partner_roll]))
+                        p_roll = getattr(m, "partner_roll_no", getattr(m, "partner_roll", ""))
+                        if not p_roll:
+                            continue
+                        pair = tuple(sorted([roll, p_roll]))
                         if pair not in seen_pairs:
                             seen_pairs.add(pair)
                             match_dict = {
@@ -92,7 +101,9 @@ def run_paper_exam_plagiarism(
                             pair_collusion_scores.setdefault(pair, []).append(reason)
 
                 question_clones[qid] = q_matches
-            except Exception:
+            except Exception as exc:
+                import logging
+                logging.getLogger("iiserb.paper_plagiarism").warning("Failed question plagiarism for %s: %s", qid, exc)
                 question_clones[qid] = []
 
         # ---- Shared Wrong-Answer & Intermediate-Error Detection ----

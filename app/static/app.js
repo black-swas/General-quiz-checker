@@ -266,19 +266,23 @@
 
   function resolveApiUrl(path) {
     if (!path) return path;
-    if (path.startsWith('http://') || path.startsWith('https://')) return path;
-    const port = window.location.port;
-    if (port && port !== '8000' && path.startsWith('/api/')) {
-      const host = window.location.hostname || '127.0.0.1';
-      return `http://${host}:8000${path}`;
+    const token = state.token || sessionStorage.getItem('qe_token') || (new URLSearchParams(window.location.search)).get('token') || '';
+    let target = path;
+    if (token && !target.includes('token=')) {
+      const sep = target.includes('?') ? '&' : '?';
+      target = `${target}${sep}token=${encodeURIComponent(token)}`;
     }
-    return path;
+    return target;
   }
 
   async function api(path, options = {}, allowRetry = true) {
     const targetUrl = resolveApiUrl(path);
     const headers = Object.assign({}, options.headers || {});
-    if (state.token) headers['X-API-Key'] = state.token;
+    const token = state.token || sessionStorage.getItem('qe_token') || (new URLSearchParams(window.location.search)).get('token') || '';
+    if (token) {
+      headers['X-API-Key'] = token;
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     let resp;
     try {
       resp = await fetch(targetUrl, Object.assign({}, options, { headers }));
@@ -320,85 +324,7 @@
     else dlg.setAttribute('open', '');
   }
 
-  async function openPolyglotHubModal() {
-    const dlg = $('polyglotHubModal');
-    if (!dlg) return;
-    try {
-      const resp = await api('/api/polyglot/benchmark-results');
-      const data = await resp.json();
-      if (data && data.latest) {
-        const rep = data.latest;
-        if ($('polyglotOverallAcc')) $('polyglotOverallAcc').textContent = `${rep.overall_accuracy_pct}%`;
-        if ($('polyglotOverallCount')) $('polyglotOverallCount').textContent = `${rep.total_passed} / ${rep.total_tasks} passing`;
-        if ($('polyglotLangCount')) $('polyglotLangCount').textContent = `${rep.languages ? rep.languages.length : 5} / 5`;
-        if ($('polyglotAvgLatency')) {
-          const lats = Object.values(rep.per_language_stats || {}).map(s => s.avg_latency_sec || 0);
-          const avgL = lats.length ? (lats.reduce((a, b) => a + b, 0) / lats.length).toFixed(2) : '1.03';
-          $('polyglotAvgLatency').textContent = `${avgL}s`;
-        }
-        if ($('polyglotSandboxCount')) {
-          const activeRts = data.runtimes ? Object.values(data.runtimes).filter(Boolean).length : 7;
-          $('polyglotSandboxCount').textContent = `${activeRts} Active`;
-        }
 
-        const tbody = $('polyglotLangTbody');
-        if (tbody) {
-          tbody.replaceChildren();
-          const rts = data.runtimes || {};
-          const rtLabels = {
-            python: 'python3 -I -B (AST Syntax Check)',
-            cpp: 'MSYS2 MinGW g++ 16.1 (C++17)',
-            js: 'Node.js v22.14.0 (V8 Engine)',
-            go: 'Go 1.27.1 (GO111MODULE=off)',
-            java: 'Microsoft OpenJDK 17 Hotspot',
-          };
-          for (const [lang, stats] of Object.entries(rep.per_language_stats || {})) {
-            const tr = document.createElement('tr');
-            const langClass = `lang-badge lang-badge-${lang}`;
-            tr.innerHTML = `
-              <td><span class="${langClass}">${lang.toUpperCase()}</span></td>
-              <td><strong style="color:var(--green);">${stats.accuracy_pct}%</strong></td>
-              <td>${stats.passed} / ${stats.total}</td>
-              <td>${stats.avg_latency_sec}s</td>
-              <td><span class="pill ${rts[lang] || rts[lang==='js'?'javascript':lang] ? 'pill-ok' : 'pill-warn'}">${rtLabels[lang] || lang}</span></td>
-              <td><span class="pill pill-ok">PASS (${stats.total - stats.passed === 0 ? '0 Errors' : `${stats.total - stats.passed} failed`})</span></td>
-            `;
-            tbody.appendChild(tr);
-          }
-        }
-
-        const histTbody = $('polyglotHistoryTbody');
-        if (histTbody && data.history) {
-          histTbody.replaceChildren();
-          const notesByIter = {
-            1: 'Baseline: MinGW g++ headers, Python test runner name fixes',
-            2: 'AST deduplication, package main strip, Java util auto-import',
-            3: 'Identified Go cache concurrency lock, added execution mutex',
-            4: 'Clean unused Go imports, non-nil make([]T, 0) slice prompt rules',
-            5: '100% PASS across all 5 languages (75/75), sub-second latency',
-            6: 'Productionized Go build with GO111MODULE=off & OpenJDK auto-detection',
-            7: 'Full native sandbox integration in gcc_sandbox.py across all runtimes',
-          };
-          data.history.forEach(h => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-              <td><strong>Iteration #${h.iteration}</strong></td>
-              <td class="muted small">${h.timestamp || 'N/A'}</td>
-              <td>${h.num_samples_per_lang} / lang</td>
-              <td><strong style="color:${h.overall_accuracy_pct >= 95 ? 'var(--green)' : (h.overall_accuracy_pct >= 80 ? 'var(--blue)' : 'var(--amber)')};">${h.overall_accuracy_pct}%</strong></td>
-              <td>${h.total_wall_clock_sec}s</td>
-              <td class="small">${notesByIter[h.iteration] || (h.overall_accuracy_pct === 100 ? '100% Functional Accuracy Passed' : 'Optimizations applied')}</td>
-            `;
-            histTbody.appendChild(tr);
-          });
-        }
-      }
-    } catch(err) {
-      console.warn('Could not fetch polyglot benchmark results', err);
-    }
-    if (dlg.showModal) dlg.showModal();
-    else dlg.setAttribute('open', '');
-  }
 
   function renderStatusPills() {
     const box = $('statusPills');

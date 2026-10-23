@@ -26,14 +26,15 @@ logger = logging.getLogger("iiserb.pdf_ingestor")
 
 # Common patterns for student IDs in filenames
 STUDENT_ID_PATTERNS = [
-    re.compile(r"^(?:student|std|cand)[_\-\s]*(\d+)", re.IGNORECASE),
-    re.compile(r"^(\d{6,12})", re.IGNORECASE),                         # Institutional roll numbers like 1101901107
-    re.compile(r"^([a-zA-Z]{1,4}\d{4,10})", re.IGNORECASE),           # E.g. CS25104, B21001
+    re.compile(r"^((?:student|std|cand)[_\-\s]*\d+)", re.IGNORECASE),
+    re.compile(r"^(\d{4,12})", re.IGNORECASE),                         # Institutional roll numbers like 26416 or 1101901107
+    re.compile(r"^([a-zA-Z]{1,4}\d{3,10})", re.IGNORECASE),           # E.g. CS25104, B21001
     re.compile(r"^([a-zA-Z0-9_\-]+)", re.IGNORECASE),
 ]
 
 PAGE_NUM_PATTERNS = [
     re.compile(r"[_\-\s]p(?:age)?[_\-\s]*(\d+)", re.IGNORECASE),
+    re.compile(r"[_\-\s]pg[_\-\s]*(\d+)", re.IGNORECASE),
     re.compile(r"[_\-\s](\d+)$", re.IGNORECASE),
 ]
 
@@ -41,15 +42,12 @@ PAGE_NUM_PATTERNS = [
 def extract_student_id_from_filename(filename: str) -> str:
     """Extract a clean, consistent student roll_no / ID from a filename."""
     stem = Path(filename).stem.strip()
-    clean_stem = re.sub(r"[_\-\s]p(?:age)?[_\-\s]*\d+$", "", stem, flags=re.IGNORECASE)
+    clean_stem = re.sub(r"[_\-\s]+(?:p(?:age)?|pg)[_\-\s]*\d+$", "", stem, flags=re.IGNORECASE)
     for pattern in STUDENT_ID_PATTERNS:
-        m = pattern.search(clean_stem)
+        m = pattern.search(clean_stem or stem)
         if m:
-            val = m.group(1).strip()
-            if clean_stem.lower().startswith("student_"):
-                return f"Student_{val}"
-            return val
-    return clean_stem or "Unknown_Student"
+            return m.group(1).strip()
+    return clean_stem or stem or "Unknown_Student"
 
 
 def extract_page_no_from_filename(filename: str, default: int = 1) -> int:
@@ -67,13 +65,18 @@ def extract_page_no_from_filename(filename: str, default: int = 1) -> int:
     return default
 
 
+MAX_ZIP_FILES = 1000
+MAX_ZIP_TOTAL_UNCOMPRESSED = 350 * 1024 * 1024  # 350 MB
+MAX_ZIP_SINGLE_FILE = 100 * 1024 * 1024        # 100 MB
+
+
 def render_pdf_to_images(
     pdf_source: bytes | str | Path,
-    scale: float = 1.0,
+    scale: float = 2.0,
     jpeg_quality: int = 88,
     max_pages: int = 50,
 ) -> List[Tuple[int, bytes, Tuple[int, int]]]:
-    """Render pages of a PDF document into high-quality JPEG byte buffers.
+    """Render pages of a PDF document into high-quality JPEG byte buffers (~150 DPI for legibility).
 
     Returns:
         List of (page_no, jpeg_bytes, (width, height)) where page_no is 1-indexed.
@@ -144,16 +147,34 @@ def process_bulk_exam_files(
 
         name_lower = orig_name.lower()
 
-        # Case 1: ZIP Archive
+        # Case 1: ZIP Archive with Zip-Bomb and Zip-Slip defenses
         if name_lower.endswith(".zip") or zipfile.is_zipfile(io.BytesIO(raw_data)):
             try:
                 with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
-                    for zinfo in zf.infolist():
+                    infolist = zf.infolist()
+                    if len(infolist) > MAX_ZIP_FILES:
+                        logger.warning("ZIP file %s exceeds file count limit (%d files)", orig_name, len(infolist))
+                        continue
+
+                    total_uncompressed = 0
+                    for zinfo in infolist:
                         if zinfo.is_dir():
                             continue
                         inner_name = zinfo.filename
+                        # Zip-slip path traversal guard
+                        if ".." in inner_name or inner_name.startswith("/") or inner_name.startswith("\\"):
+                            continue
                         if any(seg.startswith("__") or seg.startswith(".") for seg in Path(inner_name).parts):
                             continue
+                        if zinfo.file_size > MAX_ZIP_SINGLE_FILE:
+                            logger.warning("Skipping oversized file %s in %s (%d bytes)", inner_name, orig_name, zinfo.file_size)
+                            continue
+
+                        total_uncompressed += zinfo.file_size
+                        if total_uncompressed > MAX_ZIP_TOTAL_UNCOMPRESSED:
+                            logger.warning("ZIP file %s exceeds total uncompressed size limit", orig_name)
+                            break
+
                         inner_bytes = zf.read(zinfo)
                         sub_results = process_bulk_exam_files([(inner_name, inner_bytes)])
                         for s_id, s_pages in sub_results.items():
@@ -165,7 +186,7 @@ def process_bulk_exam_files(
         # Case 2: PDF File
         if name_lower.endswith(".pdf") or is_pdf_buffer(raw_data):
             try:
-                rendered_pages = render_pdf_to_images(raw_data, scale=1.0)
+                rendered_pages = render_pdf_to_images(raw_data, scale=2.0)
                 assigned_roll = target_roll_no or extract_student_id_from_filename(orig_name)
                 for pno, jpg_bytes, _ in rendered_pages:
                     students.setdefault(assigned_roll, []).append((pno, jpg_bytes, f"{orig_name}#page_{pno}"))

@@ -73,20 +73,28 @@
 
   function resolveApiUrl(path) {
     if (!path) return path;
-    if (path.startsWith('http://') || path.startsWith('https://')) return path;
-    const port = window.location.port;
-    if (port && port !== '8000' && path.startsWith('/api/')) {
-      const host = window.location.hostname || '127.0.0.1';
-      return `http://${host}:8000${path}`;
+    const urlParams = new URLSearchParams(window.location.search);
+    const tokenFromUrl = urlParams.get('token');
+    if (tokenFromUrl) {
+      sessionStorage.setItem('qe_token', tokenFromUrl);
     }
-    return path;
+    const token = sessionStorage.getItem('qe_token') || tokenFromUrl || '';
+    let target = path;
+    if (token && !target.includes('token=')) {
+      const sep = target.includes('?') ? '&' : '?';
+      target = `${target}${sep}token=${encodeURIComponent(token)}`;
+    }
+    return target;
   }
 
   async function api(path, options = {}) {
     const targetUrl = resolveApiUrl(path);
     const headers = Object.assign({}, options.headers || {});
-    const token = sessionStorage.getItem('qe_token') || '';
-    if (token) headers['X-API-Key'] = token;
+    const token = sessionStorage.getItem('qe_token') || (new URLSearchParams(window.location.search)).get('token') || '';
+    if (token) {
+      headers['X-API-Key'] = token;
+      headers['Authorization'] = `Bearer ${token}`;
+    }
     const resp = await fetch(targetUrl, Object.assign({}, options, { headers }));
     if (!resp.ok) {
       let detail = resp.statusText;
@@ -171,7 +179,7 @@
     lightboxState.panX = 0;
     lightboxState.panY = 0;
     lightboxState.isPanning = false;
-    img.src = src;
+    img.src = resolveApiUrl(src);
     if (titleEl) titleEl.textContent = title;
     updateLightboxTransform();
     if (typeof modal.showModal === 'function') {
@@ -280,6 +288,15 @@
     const uploadId = `${sessionId}_${rollNo}_p${pageNo}_${Date.now()}`;
     const chunks = [];
 
+    let sha256Hex = '';
+    try {
+      if (window.crypto && window.crypto.subtle) {
+        const hashBuf = await crypto.subtle.digest('SHA-256', arrayBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuf));
+        sha256Hex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+      }
+    } catch (_) {}
+
     for (let i = 0; i < totalChunks; i++) {
       const slice = bytes.subarray(i * CHUNK_SIZE, Math.min(bytes.length, (i + 1) * CHUNK_SIZE));
       let binary = '';
@@ -295,6 +312,7 @@
         chunk_index: i,
         total_chunks: totalChunks,
         chunk_base64: b64,
+        sha256_full: sha256Hex || undefined,
         is_retake: Boolean(isRetake),
         ta_name: state.taName || undefined,
       });
@@ -364,33 +382,56 @@
         if (!items.length) break;
         items.sort((a, b) => a.upload_id.localeCompare(b.upload_id) || a.chunk_index - b.chunk_index);
         const item = items[0];
-        const resp = await api(`/api/sessions/${encodeURIComponent(item.session_id)}/upload-chunk`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roll_no: item.roll_no,
-            student_name: item.student_name,
-            page_no: item.page_no,
-            upload_id: item.upload_id,
-            chunk_index: item.chunk_index,
-            total_chunks: item.total_chunks,
-            chunk_base64: item.chunk_base64,
-            is_retake: item.is_retake,
-            ta_name: item.ta_name || state.taName || undefined,
-          }),
-        });
-        const resData = await resp.json();
-        await removeQueuedChunk(item.id);
-        await updateQueueBadge();
-        if (resData.status === 'page_complete') {
-          toast(`Saved & flattened Roll ${item.roll_no} · Page ${item.page_no}`);
-          if (state.activeSessionId === item.session_id) {
-            await refreshActiveSession(false);
+        try {
+          const resp = await api(`/api/sessions/${encodeURIComponent(item.session_id)}/upload-chunk`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roll_no: item.roll_no,
+              student_name: item.student_name,
+              page_no: item.page_no,
+              upload_id: item.upload_id,
+              chunk_index: item.chunk_index,
+              total_chunks: item.total_chunks,
+              chunk_base64: item.chunk_base64,
+              sha256_full: item.sha256_full || undefined,
+              is_retake: item.is_retake,
+              ta_name: item.ta_name || state.taName || undefined,
+            }),
+          });
+          const resData = await resp.json();
+          await removeQueuedChunk(item.id);
+          await updateQueueBadge();
+          if (resData.status === 'page_complete') {
+            playSuccessChime();
+            toast(`Saved & flattened Roll ${item.roll_no} · Page ${item.page_no}`);
+            if (state.activeSessionId === item.session_id) {
+              await refreshActiveSession(false);
+            }
           }
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          // If server returned 410 (buffer expired or missing): purge orphaned chunks for this upload
+          if (msg.includes('410') || msg.includes('Chunk buffer expired') || msg.includes('retry_from_start')) {
+            toast(`Upload buffer expired on server for Roll ${item.roll_no} p${item.page_no}; discarding orphaned chunks. Please rescan.`);
+            const allItems = await getQueuedChunks();
+            for (const other of allItems) {
+              if (other.upload_id === item.upload_id) {
+                await removeQueuedChunk(other.id);
+              }
+            }
+            continue;
+          }
+          // If permanent client error: drop poisoned chunk from head of queue
+          if (msg.includes('400') || msg.includes('404') || msg.includes('413') || msg.includes('422') || msg.includes('Invalid base64')) {
+            toast(`Upload failed for Roll ${item.roll_no} p${item.page_no}: ${msg}. Skipping item.`);
+            await removeQueuedChunk(item.id);
+            continue;
+          }
+          // Genuine temporary network failure: exit loop and wait for next interval
+          break;
         }
       }
-    } catch (_err) {
-      // Offline blip; background timer retries automatically
     } finally {
       state.syncBusy = false;
       await updateQueueBadge();
@@ -399,6 +440,9 @@
 
   // --------------------------------------------------------------------------- Mode Switching
   function switchMode(mode) {
+    if (mode !== 'capture') {
+      stopLiveCamera();
+    }
     if (mode === 'capture' && !state.taName) {
       toast('Please enter your TA identity before launching the camera.');
       mode = 'ta-login';
@@ -1321,7 +1365,7 @@
           const isExtra = p.page_no > expPages;
           const sheetLabel = isExtra ? `Extra #${p.page_no - expPages} (Page ${p.page_no})` : `Sheet ${p.page_no}`;
           return h('div', { class: 'sheet-tray-card' },
-            h('img', { src: `${p.image_url}?v=${Date.now()}`, alt: `Sheet ${p.page_no}` }),
+            h('img', { src: resolveApiUrl(`${p.image_url}?v=${Date.now()}`), alt: `Sheet ${p.page_no}` }),
             h('div', null,
               h('div', { style: 'font-weight:700;font-size:0.86rem;color:var(--text);' }, sheetLabel),
               h('span', { class: 'pill pill-ok', style: 'font-size:0.7rem;padding:2px 6px;' }, '✓ Top & Bottom Halves Ready (2x)')
@@ -1397,7 +1441,7 @@
     const pageObj = (stRecord ? stRecord.pages || [] : []).find((p) => p.page_no === state.currentPage);
     if (pageObj && !cameraEngine.active) {
       if (previewImg) {
-        previewImg.src = `${pageObj.image_url}?t=${Date.now()}`;
+        previewImg.src = resolveApiUrl(`${pageObj.image_url}?t=${Date.now()}`);
         previewImg.hidden = false;
       }
       if (videoEl) videoEl.hidden = true;
@@ -1774,12 +1818,18 @@
     const video = $('cameraVideo');
     if (!video || video.hidden || !cameraEngine.active) return;
 
+    const chkAuto = $('chkAutoCapture');
+    if (chkAuto && !chkAuto.checked) {
+      const autoBadge = $('hudAutoStatusBadge');
+      if (autoBadge) autoBadge.textContent = 'Auto-Snap: Off';
+      return;
+    }
+
     const gate = evaluate4Gates(video);
     const sharpness = gate.sharpness;
     const badge = $('hudSharpnessBadge');
     const autoBadge = $('hudAutoStatusBadge');
     const guideBox = $('greenGuideBox');
-    const chkAuto = $('chkAutoCapture');
     const autoCaptureEnabled = chkAuto && chkAuto.checked;
 
     const now = Date.now();
@@ -2046,33 +2096,79 @@
 
   // --------------------------------------------------------------------------- Step 3: Live Laptop Results, Concurrent Grading & Excel Export
   let gradingPollTimer = null;
+  let isGradingActive = false;
+  let gradingPollBusy = false;
 
   async function triggerSessionAiEvaluation(onlyRollNo = null, onlyQuestionId = null) {
     if (!state.activeSessionId) return;
+    if (isGradingActive) {
+      toast('AI grading is currently in progress. Please wait.');
+      return;
+    }
+    const btn = $('btnRunAiEvaluation');
+    if (!onlyRollNo && !onlyQuestionId) {
+      const ok = confirm('Start concurrent AI grading across all student submissions?');
+      if (!ok) return;
+    }
+    isGradingActive = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Grading in progress…';
+    }
     try {
       await flushChunkQueue();
-      await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/evaluate`, {
+      const res = await (await api(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           only_roll_no: onlyRollNo,
           only_question_id: onlyQuestionId,
-          force_regrade: true,
+          force_regrade: false,
         }),
-      });
-      toast('Started concurrent Claude Haiku 5.5 grading with Ephemeral Prompt Caching!');
+      })).json();
+      if (res.status === 'already_grading') {
+        toast(res.message || 'Evaluation is already running for this session.');
+      } else {
+        toast('Started concurrent AI grading with Ephemeral Prompt Caching!');
+      }
       startGradingPoll();
     } catch (err) {
       toast(`Evaluation error: ${err.message}`);
+    } finally {
+      setTimeout(() => {
+        isGradingActive = false;
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '⚡ Grade All Submissions Concurrently';
+        }
+      }, 3000);
     }
   }
 
   function startGradingPoll() {
     clearInterval(gradingPollTimer);
     gradingPollTimer = setInterval(async () => {
-      await refreshActiveSession(false);
-      if (!state.session || state.session.status !== 'GRADING') {
-        clearInterval(gradingPollTimer);
+      if (gradingPollBusy) return;
+      gradingPollBusy = true;
+      try {
+        if (!state.activeSessionId) {
+          clearInterval(gradingPollTimer);
+          gradingPollTimer = null;
+          return;
+        }
+        await refreshActiveSession(false);
+        if (!state.session || state.session.status !== 'GRADING') {
+          clearInterval(gradingPollTimer);
+          gradingPollTimer = null;
+          isGradingActive = false;
+          const btn = $('btnRunAiEvaluation');
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = '⚡ Grade All Submissions Concurrently';
+          }
+        }
+      } finally {
+        gradingPollBusy = false;
       }
     }, 1200);
   }
@@ -2138,7 +2234,8 @@
       }
       listEl.replaceChildren(...filtered.map((st) => {
         const maxExamMarks = st.total_max_marks || s.total_marks || 20;
-        const pct = maxExamMarks > 0 ? Math.round((st.total_awarded_marks / maxExamMarks) * 100) : 0;
+        const isGraded = typeof st.total_awarded_marks === 'number' && !isNaN(st.total_awarded_marks) && st.grading_status !== 'UNGRADED';
+        const pct = isGraded && maxExamMarks > 0 ? Math.round((st.total_awarded_marks / maxExamMarks) * 100) : null;
         let claimBadge = null;
         if (st.claimed_by) {
           const isMine = Boolean(state.taName && st.claimed_by.toLowerCase() === state.taName.toLowerCase());
@@ -2160,7 +2257,7 @@
           h('div', { style: 'font-size:0.75rem;color:var(--muted-mobile);', text: `${st.pages_uploaded} page(s) scanned` }),
           claimBadge),
         h('div', { style: 'text-align:right;' },
-          h('div', { style: 'font-weight:700;', text: `${st.total_awarded_marks} / ${maxExamMarks} (${pct}%)` }),
+          h('div', { style: 'font-weight:700;', text: isGraded ? `${st.total_awarded_marks} / ${maxExamMarks} (${pct}%)` : `Ungraded / ${maxExamMarks}` }),
           h('span', { class: `badge badge-${st.overall_tab}`, text: st.overall_tab })));
       }));
     }
@@ -2210,7 +2307,7 @@
             style: 'border:1px solid var(--border);cursor:pointer;',
             title: `Click to view Sheet ${p.page_no} (Full) in Lightbox`,
             text: `📄 Sheet ${p.page_no} (Full)`,
-            onclick: () => openImageLightbox(`${p.image_url}?v=${versionTag}`, `Roll ${student.roll_no} · Sheet ${p.page_no} (Full)`),
+            onclick: () => openImageLightbox(resolveApiUrl(`${p.image_url}?v=${versionTag}`), `Roll ${student.roll_no} · Sheet ${p.page_no} (Full)`),
           }),
           h('button', {
             type: 'button',
@@ -2218,7 +2315,7 @@
             style: 'border:1px solid var(--border);cursor:pointer;',
             title: `Click to view Sheet ${p.page_no} (Top Half) in Lightbox`,
             text: `Sheet ${p.page_no} Top`,
-            onclick: () => openImageLightbox(`${p.image_url}?half=top&v=${versionTag}`, `Roll ${student.roll_no} · Sheet ${p.page_no} (Top Half)`),
+            onclick: () => openImageLightbox(resolveApiUrl(`${p.image_url}?half=top&v=${versionTag}`), `Roll ${student.roll_no} · Sheet ${p.page_no} (Top Half)`),
           }),
           h('button', {
             type: 'button',
@@ -2226,7 +2323,7 @@
             style: 'border:1px solid var(--border);cursor:pointer;',
             title: `Click to view Sheet ${p.page_no} (Bottom Half) in Lightbox`,
             text: `Sheet ${p.page_no} Bottom`,
-            onclick: () => openImageLightbox(`${p.image_url}?half=bottom&v=${versionTag}`, `Roll ${student.roll_no} · Sheet ${p.page_no} (Bottom Half)`),
+            onclick: () => openImageLightbox(resolveApiUrl(`${p.image_url}?half=bottom&v=${versionTag}`), `Roll ${student.roll_no} · Sheet ${p.page_no} (Bottom Half)`),
           }),
           h('button', {
             type: 'button',
@@ -2409,10 +2506,10 @@
         h('div', { style: 'position:relative;display:inline-block;max-width:100%;' },
           h('img', {
             class: 'q-crop-img',
-            src: `${ev.crop_url}?v=${versionTag}`,
+            src: resolveApiUrl(`${ev.crop_url}?v=${versionTag}`),
             alt: `${student.roll_no} ${qid} answer crop`,
             title: 'Click to open in high-res Lightbox with Zoom & Contrast boost',
-            onclick: () => openImageLightbox(`${ev.crop_url}?v=${versionTag}`, `${student.roll_no} · ${qNum} Answer Crop`),
+            onclick: () => openImageLightbox(resolveApiUrl(`${ev.crop_url}?v=${versionTag}`), `${student.roll_no} · ${qNum} Answer Crop`),
             onerror: (e) => { e.target.style.display = 'none'; },
           }),
           h('span', {
@@ -2474,8 +2571,9 @@
     const hasPrev = currentIdx > 0;
     const hasNext = currentIdx >= 0 && currentIdx < allStudents.length - 1;
 
-    const pct = (s.total_marks > 0) ? Math.round((student.total_awarded_marks / s.total_marks) * 100) : 0;
-    const scorePillClass = pct >= 70 ? 'score-pill-high' : (pct >= 40 ? 'score-pill-mid' : 'score-pill-low');
+    const isStudentGraded = typeof student.total_awarded_marks === 'number' && !isNaN(student.total_awarded_marks) && student.grading_status !== 'UNGRADED';
+    const pct = isStudentGraded && (s.total_marks > 0) ? Math.round((student.total_awarded_marks / s.total_marks) * 100) : null;
+    const scorePillClass = pct !== null ? (pct >= 70 ? 'score-pill-high' : (pct >= 40 ? 'score-pill-mid' : 'score-pill-low')) : 'score-pill-low';
 
     const approveAllAiGrades = async () => {
       try {
@@ -2540,7 +2638,7 @@
       ),
       h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' },
         h('span', { class: `score-pill-badge ${scorePillClass}`, title: 'Total Student Exam Score' },
-          `🎯 ${student.total_awarded_marks} / ${s.total_marks} M (${pct}%)`
+          isStudentGraded ? `🎯 ${student.total_awarded_marks} / ${s.total_marks} M (${pct}%)` : `🎯 Ungraded / ${s.total_marks} M`
         ),
         h('button', {
           type: 'button', class: 'btn-quick-accept',
@@ -2557,7 +2655,7 @@
         h('button', {
           type: 'button', class: 'btn btn-sm btn-ghost',
           text: '📄 Feedback PDF',
-          onclick: () => window.open(`/api/sessions/${state.activeSessionId}/students/${student.roll_no}/feedback.pdf`, '_blank'),
+          onclick: () => window.open(resolveApiUrl(`/api/sessions/${state.activeSessionId}/students/${student.roll_no}/feedback.pdf`), '_blank'),
         })
       )
     );
@@ -2650,7 +2748,7 @@
 
   async function downloadBookletPdf() {
     if (state.activeSessionId) {
-      window.open(`/api/sessions/${state.activeSessionId}/template.pdf`, '_blank');
+      window.open(resolveApiUrl(`/api/sessions/${state.activeSessionId}/template.pdf`), '_blank');
       return;
     }
     // No active session yet: preview booklet directly from current form configuration
@@ -2678,7 +2776,7 @@
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
       toast('Exam booklet template generated & downloaded!');
     } catch (err) {
       toast(`Could not generate preview booklet: ${err.message}`);
@@ -2752,7 +2850,7 @@
 
   function downloadFeedbackZip() {
     if (!state.activeSessionId) return;
-    window.open(`/api/sessions/${state.activeSessionId}/export-feedback-zip`, '_blank');
+    window.open(resolveApiUrl(`/api/sessions/${state.activeSessionId}/export-feedback-zip`), '_blank');
   }
 
   // --------------------------------------------------------------------------- Claude Haiku 5.5 Usage & Token Telemetry Dashboard
@@ -3342,7 +3440,7 @@
     if ($('btnViewQpImage')) {
       $('btnViewQpImage').addEventListener('click', () => {
         if (!state.activeSessionId) return;
-        window.open(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/question-paper-image`, '_blank');
+        window.open(resolveApiUrl(`/api/sessions/${encodeURIComponent(state.activeSessionId)}/question-paper-image`), '_blank');
       });
     }
     if ($('btnRemoveQpImage')) {
@@ -3410,16 +3508,22 @@
         if (!roll) {
           toast('Please enter the Student Roll Number first.');
           if ($('scanRollNo')) $('scanRollNo').focus();
+          e.target.value = '';
           return;
         }
         toast(`Uploading ${files.length} sheets for Roll ${roll}...`);
-        for (let i = 0; i < files.length; i++) {
-          state.currentPage = i + 1;
-          await handleCapturedBlob(files[i]);
+        try {
+          for (let i = 0; i < files.length; i++) {
+            state.currentPage = i + 1;
+            await handleCapturedBlob(files[i]);
+          }
+          toast(`Uploaded all ${files.length} sheets! Split into 2N top/bottom halves.`);
+          renderCapturePanel();
+        } catch (err) {
+          toast(`Batch upload error: ${err.message}`);
+        } finally {
+          e.target.value = '';
         }
-        e.target.value = '';
-        toast(`Uploaded all ${files.length} sheets! Split into 2N top/bottom halves.`);
-        renderCapturePanel();
       });
     }
 
@@ -3556,10 +3660,12 @@
       }
     });
 
-    // Hardware Shutter / Bluetooth Clicker keys in Capture mode (VolumeUp, VolumeDown, Space, Enter)
+    // Hardware Shutter / Bluetooth Clicker keys in Capture mode (AudioVolumeUp, AudioVolumeDown, VolumeUp, VolumeDown, Space, Enter)
     window.addEventListener('keydown', (e) => {
       if (state.mode === 'capture') {
-        if (['Space', 'Enter', 'VolumeUp', 'VolumeDown'].includes(e.code) || [' ', 'Enter'].includes(e.key)) {
+        const validCodes = ['Space', 'Enter', 'AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp', 'VolumeDown'];
+        const validKeys = [' ', 'Enter', 'AudioVolumeUp', 'AudioVolumeDown', 'VolumeUp', 'VolumeDown'];
+        if (validCodes.includes(e.code) || validKeys.includes(e.key)) {
           if (!['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target && e.target.tagName) || '')) {
             e.preventDefault();
             captureFromVideoOrFallback();

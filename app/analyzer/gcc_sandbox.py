@@ -172,9 +172,16 @@ def normalize_output(text: str) -> str:
 
 
 def _try_float(s: str) -> Optional[float]:
+    s_clean = s.strip()
+    # Do not coerce integers with leading zeros (e.g. '007', '01') into float matches
+    if re.match(r"^[+-]?0\d+", s_clean):
+        return None
+    # Do not coerce word variations of infinity into floats
+    if s_clean.lower() in ("inf", "-inf", "+inf", "infinity", "-infinity", "+infinity"):
+        return None
     try:
-        val = float(s)
-        if math.isnan(val):
+        val = float(s_clean)
+        if math.isnan(val) or math.isinf(val):
             return None
         return val
     except (ValueError, TypeError):
@@ -350,6 +357,91 @@ def diagnose_case_failure(
     return "WRONG_ANSWER"
 
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100
+    _JOB_OBJECT_LIMIT_JOB_MEMORY = 0x00000200
+    _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x00000008
+    _JobObjectExtendedLimitInformation = 9
+
+
+def _assign_windows_job(proc: subprocess.Popen, mem_limit_bytes: int) -> Optional[int]:
+    """Applies Windows Job Object hard memory limits and kill-on-close to proc."""
+    if os.name != "nt":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | _JOB_OBJECT_LIMIT_JOB_MEMORY
+            | _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        )
+        info.BasicLimitInformation.ActiveProcessLimit = 16
+        info.ProcessMemoryLimit = mem_limit_bytes
+        info.JobMemoryLimit = mem_limit_bytes
+        res = kernel32.SetInformationJobObject(
+            job,
+            _JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        proc_handle = getattr(proc, "_handle", None)
+        if proc_handle and res:
+            kernel32.AssignProcessToJobObject(job, int(proc_handle))
+        return job
+    except Exception:
+        return None
+
+
+def _close_windows_job(job_handle: Optional[int]) -> None:
+    if os.name == "nt" and job_handle:
+        try:
+            ctypes.windll.kernel32.CloseHandle(job_handle)
+        except Exception:
+            pass
+
+
 def _with_limits(
     cmd: List[str], cpu: int, mem: int, fsize: int, nproc: Optional[int] = None
 ) -> Tuple[List[str], Optional[Callable[[], None]]]:
@@ -457,9 +549,17 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
                 if m:
                     main_class = m.group(1)
                 else:
-                    m2 = re.search(r"\bclass\s+([A-Za-z_]\w*)\s*\{[^}]*public\s+static\s+void\s+main", content)
-                    if m2:
-                        main_class = m2.group(1)
+                    classes = list(re.finditer(r"\bclass\s+([A-Za-z_]\w*)", content))
+                    main_match = re.search(r"\bpublic\s+static\s+void\s+main\b", content)
+                    if classes and main_match:
+                        main_pos = main_match.start()
+                        valid_classes = [c for c in classes if c.start() < main_pos]
+                        if valid_classes:
+                            main_class = valid_classes[-1].group(1)
+                        else:
+                            main_class = classes[0].group(1)
+                    elif classes:
+                        main_class = classes[0].group(1)
         except Exception:
             pass
         run_argv = [java, "-cp", tmpdir, main_class]
@@ -485,6 +585,7 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
         popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen(argv, **popen_kwargs)
+    job = _assign_windows_job(proc, comp_mem)
     try:
         _, err = proc.communicate(timeout=settings.compile_timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -494,6 +595,8 @@ def _compile_or_check(src_path: str, bin_path: str, tmpdir: str, language: str =
         except Exception:
             pass
         return -1, "", True, run_argv, label
+    finally:
+        _close_windows_job(job)
     return proc.returncode, err.decode("utf-8", errors="replace"), False, run_argv, label
 
 
@@ -538,6 +641,7 @@ def execute_binary_capped(
         popen_kwargs["start_new_session"] = True
 
     proc = subprocess.Popen(argv, **popen_kwargs)
+    job = _assign_windows_job(proc, mem_limit)
 
     # Windows handling: select() does not support pipe file descriptors on Windows.
     # We use stream reader threads to cap output at max_output_bytes and terminate runaway flood loops early.
@@ -548,15 +652,19 @@ def execute_binary_capped(
         err_chunks: List[bytes] = []
         out_len = 0
 
-        if data:
+        def _write_stdin():
+            if data:
+                try:
+                    proc.stdin.write(data)
+                except OSError:
+                    pass
             try:
-                proc.stdin.write(data)
+                proc.stdin.close()
             except OSError:
                 pass
-        try:
-            proc.stdin.close()
-        except OSError:
-            pass
+
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stdin_thread.start()
 
         def _read_out():
             nonlocal out_len, truncated
@@ -602,6 +710,8 @@ def execute_binary_capped(
                 proc.wait(timeout=0.1)
             except Exception:
                 pass
+        finally:
+            _close_windows_job(job)
 
         t_out.join(timeout=0.3)
         t_err.join(timeout=0.3)
@@ -661,7 +771,14 @@ def execute_binary_capped(
                     err_len += len(chunk)
             if truncated:
                 break
+        if not timed_out and not truncated and proc.poll() is None:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
     finally:
+        _close_windows_job(job)
         if proc.poll() is None:
             _kill_group(proc)
             try:
@@ -691,6 +808,9 @@ def run_gcc_verification(
     float_abs_tol: float = 1e-4,
 ) -> GccTestResult:
     lang = (language or "c").lower()
+    if lang == "auto" or not lang:
+        from app.analyzer.zip_ingestor import detect_language
+        lang = detect_language("submission", raw_code).lower()
     timeout_sec = timeout_sec or settings.test_timeout_seconds
     sample_total = sum(1 for t in test_cases if t.is_sample)
     hidden_total = len(test_cases) - sample_total

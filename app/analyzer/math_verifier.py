@@ -297,6 +297,16 @@ def verify_symbolic_equivalence(
     }
 
 
+def _sql_read_only_authorizer(action: int, arg1: Any, arg2: Any, dbname: Any, source: Any) -> int:
+    # Only permit SELECT, READ, and FUNCTION calls; block ATTACH, DETACH, PRAGMA, DDL, write
+    allowed_actions = {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+    }
+    return sqlite3.SQLITE_OK if action in allowed_actions else sqlite3.SQLITE_DENY
+
+
 def run_sql_in_memory_sandbox(
     schema_sql: str,
     student_query: str,
@@ -305,8 +315,17 @@ def run_sql_in_memory_sandbox(
 ) -> Dict[str, Any]:
     """Executes a student's SQL query and reference query against an in-memory SQLite database.
     
-    Ensures safe, deterministic verification of SQL submissions.
+    Ensures safe, deterministic verification of SQL submissions with strict query-only authorization.
     """
+    for forbidden in ("ATTACH", "DETACH", "PRAGMA", "LOAD_EXTENSION", "VACUUM"):
+        if re.search(rf"\b{forbidden}\b", student_query, re.I):
+            return {
+                "passed": False,
+                "error": f"Forbidden SQL operation: {forbidden} is not permitted in student queries",
+                "expected_rows": [],
+                "actual_rows": [],
+            }
+
     conn = sqlite3.connect(":memory:")
     try:
         # Run schema setup
@@ -317,7 +336,8 @@ def run_sql_in_memory_sandbox(
         ref_rows = ref_cursor.fetchall()
         col_names = [d[0] for d in ref_cursor.description] if ref_cursor.description else []
 
-        # Run student query
+        # Run student query under strict read-only authorizer
+        conn.set_authorizer(_sql_read_only_authorizer)
         try:
             st_cursor = conn.execute(student_query)
             st_rows = st_cursor.fetchall()
@@ -328,6 +348,8 @@ def run_sql_in_memory_sandbox(
                 "expected_rows": ref_rows,
                 "actual_rows": [],
             }
+        finally:
+            conn.set_authorizer(None)
 
         if match_mode == "unordered_set":
             passed = set(map(tuple, st_rows)) == set(map(tuple, ref_rows))

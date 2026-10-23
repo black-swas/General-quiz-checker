@@ -51,16 +51,35 @@ def _find_openssl_bin() -> str:
     return "openssl"
 
 
+def _is_cert_valid(cert_file: Path, openssl_bin: str) -> bool:
+    try:
+        res = subprocess.run(
+            [openssl_bin, "x509", "-checkend", "86400", "-noout", "-in", str(cert_file)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return res.returncode == 0
+    except Exception:
+        return True
+
+
 def _generate_self_signed_cert(cert_dir: Path, ip_addr: str) -> tuple[Path, Path]:
     """Generate a local self-signed TLS certificate with SubjectAltName for the laptop Wi-Fi IP."""
     cert_dir.mkdir(parents=True, exist_ok=True)
     cert_file = cert_dir / "hub_cert.pem"
     key_file = cert_dir / "hub_key.pem"
+    openssl_bin = _find_openssl_bin()
     if cert_file.is_file() and key_file.is_file():
-        return cert_file, key_file
+        if _is_cert_valid(cert_file, openssl_bin):
+            return cert_file, key_file
+        else:
+            try:
+                cert_file.unlink(missing_ok=True)
+                key_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     san = f"IP:{ip_addr},IP:127.0.0.1,DNS:localhost"
-    openssl_bin = _find_openssl_bin()
     cmd = [
         openssl_bin, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", str(key_file),
@@ -70,6 +89,10 @@ def _generate_self_signed_cert(cert_dir: Path, ip_addr: str) -> tuple[Path, Path
         "-addext", f"subjectAltName={san}",
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.chmod(str(key_file), 0o600)
+    except OSError:
+        pass
     return cert_file, key_file
 
 
@@ -100,8 +123,10 @@ def _render_ascii_qr(url: str) -> str:
 
 
 def _print_banner(scheme: str, ips: list[str], port: int, storage_dir: str) -> None:
-    scanner_url = f"{scheme}://{ips[0]}:{port}/scan"
-    laptop_url = f"{scheme}://{ips[0]}:{port}/scan?view=laptop"
+    token_query = f"?token={settings.api_auth_token}" if (settings.auth_required and settings.api_auth_token) else ""
+    token_and = f"&token={settings.api_auth_token}" if (settings.auth_required and settings.api_auth_token) else ""
+    scanner_url = f"{scheme}://{ips[0]}:{port}/scan{token_query}"
+    laptop_url = f"{scheme}://{ips[0]}:{port}/scan?view=laptop{token_and}"
     line = "=" * 78
     qr_art = _render_ascii_qr(scanner_url)
     print(f"\n{line}")
@@ -110,7 +135,7 @@ def _print_banner(scheme: str, ips: list[str], port: int, storage_dir: str) -> N
     print(f"  📱 Mobile Scanner Link (TA Phones) : {scanner_url}")
     print(f"  💻 Laptop Live Command Center      : {laptop_url}")
     if len(ips) > 1:
-        print(f"  🌐 Alternate Wi-Fi / Hotspot IPs   : {', '.join(f'{scheme}://{ip}:{port}/scan' for ip in ips[1:])}")
+        print(f"  🌐 Alternate Wi-Fi / Hotspot IPs   : {', '.join(f'{scheme}://{ip}:{port}/scan{token_query}' for ip in ips[1:])}")
     vlm_mode = "100% Offline (Ollama / Local)" if settings.vlm_provider in ("ollama", "local") else f"Cloud ({settings.vlm_provider.capitalize()})"
     print(f"  🤖 AI VLM Engine                   : {settings.primary_model} [{vlm_mode}] ({settings.llm_concurrency} workers, batch={settings.llm_vision_batch_size}, Prompt Caching ON)")
     print(line)
@@ -159,7 +184,8 @@ def main() -> None:
     _print_banner(scheme, ips, args.port, args.storage_dir)
 
     if args.open_browser:
-        laptop_url = f"{scheme}://localhost:{args.port}/scan?view=laptop"
+        token_and = f"&token={settings.api_auth_token}" if (settings.auth_required and settings.api_auth_token) else ""
+        laptop_url = f"{scheme}://localhost:{args.port}/scan?view=laptop{token_and}"
         threading.Timer(1.2, lambda: webbrowser.open(laptop_url)).start()
 
     uvicorn.run(

@@ -29,7 +29,6 @@ import numpy as np
 
 from app.analyzer.c_static_analyzer import add_line_numbers
 from app.analyzer.paper_redundancy_engine import (
-    PromptCacheWarmupLock,
     detect_adversarial_handwriting_injection,
     detect_continuation_markers,
     detect_empty_or_skipped_crop,
@@ -48,7 +47,12 @@ VISION_TOOL_NAME = "report_handwritten_reviews"
 RETRYABLE = {429, 500, 502, 503, 504, 529}
 MAX_CODE_CHARS = 8000
 _DISABLED_MODELS: Set[str] = set()
-_WARMUP_LOCK = PromptCacheWarmupLock()
+
+
+def _normalize_roll_token(s: str) -> str:
+    s = str(s or "").strip().lower()
+    s = re.sub(r'^(?:roll(?:_?no)?|student(?:_?id)?)\s*[:=\-]?\s*', '', s)
+    return re.sub(r'[^a-z0-9]', '', s)
 
 VALID_CHEAT_TYPES = {
     "NONE",
@@ -352,16 +356,54 @@ def build_system_prompt(question: QuestionSpec, calibration: str, nonce: str) ->
     )
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely coerce numbers and qualitative confidence/mark strings (e.g. 'high', '95%') to float."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("high", "clean", "pass", "green"):
+            return 0.95
+        if v in ("medium", "mod", "blue", "gray"):
+            return 0.70
+        if v in ("low", "fail", "red"):
+            return 0.30
+        if v.endswith("%"):
+            try:
+                return float(v[:-1].strip()) / 100.0
+            except ValueError:
+                return default
+        try:
+            return float(v)
+        except ValueError:
+            return default
+    return default
+
+
 def canonical_qid(qid: Any) -> str:
-    """Normalize raw question representations like '1', 'Question 1', 'Que 1', 'q1(a)' into standard 'Q1', 'Q1(a)'."""
+    """Normalize raw question representations like '1', 'Question 1', 'Que 1', 'q1(a)', '1a' into standard unified 'Q1', 'Q1A'."""
     if not qid:
         return ""
-    s = str(qid).strip()
-    s_upper = s.upper()
-    m = re.match(r"^(?:QUESTION|QUE|PROBLEM|PROB|Q)?\s*(\d+.*)$", s_upper)
+    s = str(qid).strip().upper()
+    # Normalize formats like "1(a)", "1a", "1-a", "1.a", "Question 1(a)" into "Q1A"
+    m = re.match(r"^(?:QUESTION|QUE|PROBLEM|PROB|Q)?\s*(\d+)\s*(?:[\(\.\-\_]?\s*([A-Za-z0-9]+)\s*[\)]?)?$", s)
     if m:
-        return f"Q{m.group(1)}"
-    return s_upper
+        num = m.group(1)
+        sub = m.group(2)
+        if sub:
+            return f"Q{num}{sub.upper()}"
+        return f"Q{num}"
+    # Fallback cleanup: strip parens and punctuation
+    cleaned = re.sub(r"[\s\(\)\.\-\_]+", "", s)
+    if cleaned.startswith("QUESTION"):
+        cleaned = "Q" + cleaned[8:]
+    elif cleaned.startswith("QUE"):
+        cleaned = "Q" + cleaned[3:]
+    elif not cleaned.startswith("Q") and cleaned and cleaned[0].isdigit():
+        cleaned = "Q" + cleaned
+    return cleaned
 
 
 CALIBRATION_EXEMPLARS_TAXONOMY = (
@@ -881,7 +923,7 @@ async def _post(client: httpx.AsyncClient, payload: Dict[str, Any], headers: Dic
                     return None, 200
             message = _error_message(resp)
             _record_error(report, f"HTTP {status} ({payload.get('model')}): {message}")
-            if status == 404 or (status == 400 and ("model" in message.lower() or "not_found" in message.lower())):
+            if status == 404 or (status == 400 and any(k in message.lower() for k in ("model_not_found", "unknown model", "does not exist", "model is not supported", "invalid model"))):
                 failed_model = str(payload.get("model") or "")
                 if failed_model:
                     _DISABLED_MODELS.add(failed_model)
@@ -955,10 +997,10 @@ def _heuristic_offline_crop_evaluation(
                 "handwriting_legibility": 1.0,
                 "step_scores": [{"step": "Attempt check", "awarded": 0.0, "max": max_marks, "note": "Blank answer space detected"}],
                 "awarded_marks": 0.0,
-                "confidence": 1.0,
-                "verdict_tab": "GREEN",
-                "anomaly_flag": "NONE",
-                "ta_comment": "Question skipped / unattempted by student (0 marks awarded).",
+                "confidence": 0.50,
+                "verdict_tab": "GRAY",
+                "anomaly_flag": "POSSIBLE_BLANK",
+                "ta_comment": "Question appears blank / unattempted (0 marks suggested, requires TA verification).",
             }
     # For all non-blank crops evaluated offline without verified LLM grading:
     # NEVER award heuristic full marks or auto-approve! Route strictly to GRAY (or RED) with 0.0 marks for TA review.
@@ -982,11 +1024,11 @@ def _verify_auto_approve_gate(
     max_marks: float,
 ) -> Tuple[str, float, float, bool]:
     """Enforce deterministic guardrails on Claude's output before green-lighting a submission."""
-    conf = float(review.get("confidence", 0.0) or 0.0)
+    conf = _safe_float(review.get("confidence"), default=0.0)
     conf = max(0.0, min(1.0, conf))
-    legibility = float(review.get("handwriting_legibility", 1.0) or 0.0)
+    legibility = _safe_float(review.get("handwriting_legibility"), default=1.0)
     legibility = max(0.0, min(1.0, legibility))
-    awarded = float(review.get("awarded_marks", 0.0) or 0.0)
+    awarded = _safe_float(review.get("awarded_marks", review.get("grade")), default=0.0)
     awarded = max(0.0, min(max_marks, round(awarded, 2)))
     anomaly = str(review.get("anomaly_flag", "NONE") or "NONE").upper()
     raw_tab = str(review.get("verdict_tab", "GRAY") or "GRAY").upper()
@@ -995,7 +1037,7 @@ def _verify_auto_approve_gate(
 
     steps = review.get("step_scores") or []
     if isinstance(steps, list) and len(steps) > 0:
-        step_sum = sum(float(s.get("awarded", 0.0) or 0.0) for s in steps if isinstance(s, dict))
+        step_sum = sum(_safe_float(s.get("awarded"), default=0.0) for s in steps if isinstance(s, dict))
         if abs(step_sum - awarded) > 0.5:
             raw_tab = "RED"
             conf = min(conf, 0.70)
@@ -1280,12 +1322,13 @@ async def evaluate_session_question_crops(
                 if not candidate_models:
                     candidate_models = [settings.fallback_model]
 
+                truncated = False
                 for model in candidate_models:
                     if report["fatal"]:
                         break
                     payload = {
                         "model": model,
-                        "max_tokens": min(4096, 250 * len(batch) + 300),
+                        "max_tokens": min(8192, max(1024, 600 * len(batch) + 400)),
                         "system": [
                             {
                                 "type": "text",
@@ -1304,11 +1347,18 @@ async def evaluate_session_question_crops(
                         report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
                         report["cache_read_input_tokens"] += int(usage.get("cache_read_input_tokens", 0) or 0)
                         report["cache_creation_input_tokens"] += int(usage.get("cache_creation_input_tokens", 0) or 0)
+                        if data.get("stop_reason") == "max_tokens":
+                            truncated = True
+                            _record_error(report, f"Model {model} output was truncated by max_tokens limit")
+                            logger.warning("VLM output truncated at max_tokens limit for question %s", qid)
                         extracted = extract_reviews(data, expected_tool=VISION_TOOL_NAME)
                         for r in extracted:
-                            r_roll = str(r.get("roll_no") or (batch[0]["roll_no"] if len(batch) == 1 else "")).strip().casefold()
-                            if r_roll:
-                                reviews_map[r_roll] = r
+                            r_raw = str(r.get("roll_no") or (batch[0]["roll_no"] if len(batch) == 1 else "")).strip()
+                            r_norm = _normalize_roll_token(r_raw)
+                            if r_raw:
+                                reviews_map[r_raw.casefold()] = r
+                            if r_norm:
+                                reviews_map[r_norm] = r
                         if reviews_map:
                             report["ok_calls"] += 1
                             report["submissions_reviewed"] += len(reviews_map)
@@ -1318,10 +1368,24 @@ async def evaluate_session_question_crops(
                             break
 
             for item in batch:
-                roll_key = str(item["roll_no"]).strip().casefold()
-                rev = reviews_map.get(roll_key)
+                roll_raw = str(item["roll_no"]).strip()
+                roll_key = roll_raw.casefold()
+                roll_norm = _normalize_roll_token(roll_raw)
+                rev = reviews_map.get(roll_key) or reviews_map.get(roll_norm)
+                if not rev and len(batch) == 1 and reviews_map:
+                    rev = next(iter(reviews_map.values()))
                 if not rev:
                     rev = _heuristic_offline_crop_evaluation(Path(item["crop_path"]), item["roll_no"], item.get("student_name", ""), question)
+                    if truncated:
+                        rev["verdict_tab"] = "RED"
+                        rev["anomaly_flag"] = "LLM_TRUNCATION"
+                        rev["confidence"] = 0.0
+                        rev["ta_comment"] = f"LLM output truncated (max_tokens hit) for {qid}; evaluation incomplete, flagged for TA."
+                    elif reviews_map:
+                        rev["verdict_tab"] = "RED"
+                        rev["anomaly_flag"] = "LLM_REVIEW_MISSING"
+                        rev["confidence"] = 0.0
+                        rev["ta_comment"] = f"LLM response omitted review for student {roll_raw}; flagged for TA review."
 
                 # Edge Case Redundancy 20: Step-score sum discrepancy reconciliation
                 step_scores = rev.get("step_scores") if isinstance(rev.get("step_scores"), list) else []
@@ -1365,10 +1429,9 @@ async def evaluate_session_question_crops(
                         from app.analyzer.math_verifier import verify_symbolic_equivalence
                         m_res = verify_symbolic_equivalence(ocr_txt, str(question.get("reference_solution", "")))
                         if m_res.get("verified"):
-                            rev["confidence"] = max(float(rev.get("confidence", 0.95)), 0.98)
-                            if rev.get("verdict_tab") in ("GRAY", "BLUE") and rev.get("anomaly_flag", "NONE") == "NONE":
+                            rev["confidence"] = max(float(rev.get("confidence", 0.7)), 0.95)
+                            if rev.get("verdict_tab") in ("GRAY", "BLUE"):
                                 rev["verdict_tab"] = "GREEN"
-                                rev["awarded_marks"] = max_marks
                             if "Symbolically Verified" not in str(rev.get("ta_comment", "")):
                                 rev["ta_comment"] = (str(rev.get("ta_comment", "")) + f" [Symbolically Verified by SymPy: {m_res['match_type']}]").strip()
                     except Exception:
@@ -1579,9 +1642,38 @@ async def evaluate_session_whole_pages(
 
     # Evaluate in batches of 1 to 2 students per API call (all submission sheets per student)
     batch_size = max(1, min(2, settings.llm_vision_batch_size))
-    valid_items = [it for it in items if (it["page_images"] or (it["page_path"] and it["page_path"].is_file()))]
+    valid_items = [it for it in items if (it.get("page_images") or (it.get("page_path") and it["page_path"].is_file()))]
+    invalid_items = [it for it in items if not (it.get("page_images") or (it.get("page_path") and it["page_path"].is_file()))]
 
-    # Edge Case Redundancy: Fast-path for blank / unattempted submissions (saves 100% LLM tokens, 0ms latency)
+    for it in invalid_items:
+        crops_dir = it["crops_dir"]
+        crops_dir.mkdir(parents=True, exist_ok=True)
+        for q in questions:
+            qid = str(q.get("question_id", "Q1"))
+            max_m = float(q.get("max_marks", 5.0))
+            crop_p = crops_dir / f"{qid}.jpg"
+            save_question_evaluation(
+                session_id=session_id,
+                roll_no=it["roll_no"],
+                student_name=it["student_name"],
+                question_id=qid,
+                crop_path=str(crop_p),
+                ocr_transcription=f"[ERROR: Page scans unavailable for {qid} (Roll: {it['roll_no']})]",
+                legibility_score=0.0,
+                ai_awarded_marks=0.0,
+                max_marks=max_m,
+                step_scores=[{"step": "Scan Completeness Check", "awarded": 0.0, "max": max_m, "note": "Missing page scan; requires physical paper audit"}],
+                confidence=0.0,
+                verdict_tab="RED",
+                anomaly_flag="PAGE_MISSING",
+                ai_comment=f"Student answer page missing from booklet upload for {qid}. Requires physical paper audit.",
+                auto_approved=False,
+            )
+            report["submissions_reviewed"] += 1
+            if progress_cb:
+                progress_cb(1, report)
+
+    # Edge Case Redundancy: Fast-path for blank / unattempted submissions
     active_items: List[Dict[str, Any]] = []
     for it in valid_items:
         imgs_to_check = [p for _, p in it.get("page_images", [])] if it.get("page_images") else ([it["page_path"]] if it.get("page_path") else [])
@@ -1625,12 +1717,12 @@ async def evaluate_session_whole_pages(
                     legibility_score=1.0,
                     ai_awarded_marks=0.0,
                     max_marks=max_m,
-                    step_scores=[{"step": "Submission check", "awarded": 0.0, "max": max_m, "note": "Blank answer sheet"}],
-                    confidence=1.0,
-                    verdict_tab="GREEN",
-                    anomaly_flag="NONE",
-                    ai_comment="Student submitted an empty answer sheet (0 marks awarded).",
-                    auto_approved=True,
+                    step_scores=[{"step": "Submission check", "awarded": 0.0, "max": max_m, "note": "Blank answer sheet space detected"}],
+                    confidence=0.50,
+                    verdict_tab="GRAY",
+                    anomaly_flag="POSSIBLE_BLANK",
+                    ai_comment="Answer sheet has very low ink density (<0.3%); flagged as potentially blank for TA verification.",
+                    auto_approved=False,
                 )
                 report["submissions_reviewed"] += 1
                 if progress_cb:
@@ -1717,13 +1809,14 @@ async def evaluate_session_whole_pages(
             if not candidate_models:
                 candidate_models = [settings.fallback_model]
 
+            truncated = False
             if settings.llm_available:
                 for model in candidate_models:
                     if report["fatal"]:
                         break
                     payload = {
                         "model": model,
-                        "max_tokens": min(4096, 250 * len(batch) * max(1, len(questions)) + 300),
+                        "max_tokens": min(8192, max(2048, 600 * len(batch) * max(1, len(questions)) + 400)),
                         "system": [
                             {
                                 "type": "text",
@@ -1742,6 +1835,10 @@ async def evaluate_session_whole_pages(
                         report["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
                         report["cache_read_input_tokens"] += int(usage.get("cache_read_input_tokens", 0) or 0)
                         report["cache_creation_input_tokens"] += int(usage.get("cache_creation_input_tokens", 0) or 0)
+                        if data.get("stop_reason") == "max_tokens":
+                            truncated = True
+                            _record_error(report, f"Model {model} whole-page output truncated by max_tokens limit")
+                            logger.warning("VLM output truncated at max_tokens limit in whole-page mode")
                         extracted = extract_reviews(data, expected_tool=VISION_TOOL_NAME)
                         reviews_list.extend(extracted)
                         if extracted:
@@ -1754,12 +1851,17 @@ async def evaluate_session_whole_pages(
             # Map reviews by (roll_no.casefold(), question_id.upper())
             revs_by_roll_q: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for r in reviews_list:
-                r_roll = str(r.get("roll_no", "")).strip().casefold()
+                r_roll_raw = str(r.get("roll_no", "")).strip()
+                r_roll = r_roll_raw.casefold()
+                r_norm = _normalize_roll_token(r_roll_raw)
                 raw_qid = str(r.get("question_number") or r.get("question_id", "")).strip().upper()
                 c_qid = canonical_qid(raw_qid)
                 if r_roll and raw_qid:
                     revs_by_roll_q[(r_roll, raw_qid)] = r
                     revs_by_roll_q[(r_roll, c_qid)] = r
+                if r_norm and raw_qid:
+                    revs_by_roll_q[(r_norm, raw_qid)] = r
+                    revs_by_roll_q[(r_norm, c_qid)] = r
 
             # Save evaluations for each student across all detected & configured questions
             for it in batch:
@@ -1908,6 +2010,7 @@ async def _review_batch(
     is_retry: bool = False,
     twins_by_rep: Optional[Dict[str, List[SubmissionEvaluation]]] = None,
 ) -> None:
+    retry_missing: Optional[List[SubmissionEvaluation]] = None
     async with semaphore:
         if report["fatal"]:
             return
@@ -1915,6 +2018,7 @@ async def _review_batch(
         candidate_models = [m for m in dict.fromkeys([settings.primary_model, settings.fallback_model]) if m not in _DISABLED_MODELS]
         if not candidate_models:
             candidate_models = [settings.fallback_model]
+        applied = 0
         for model in candidate_models:
             payload = {
                 "model": model,
@@ -1958,17 +2062,24 @@ async def _review_batch(
                     if used not in report["models_used"]:
                         report["models_used"].append(used)
                     if not is_retry:
-                        missing = [e for e in batch if e.llm_model is None and e.cheat_type == "NONE" and e.tab_category != "RED"]
-                        if missing:
-                            await _review_batch(client, missing, by_roll, system, nonce, headers, report, semaphore, is_retry=True, twins_by_rep=twins_by_rep)
-                    return
+                        retry_missing = [e for e in batch if e.llm_model is None and e.cheat_type == "NONE" and e.tab_category != "RED"]
+                    break
                 _record_error(report, f"Model {model} returned no usable reviews")
             if report["fatal"]:
                 break
-        report["failed_calls"] += 1
+        if not applied:
+            report["failed_calls"] += 1
+
+    if retry_missing:
+        await _review_batch(client, retry_missing, by_roll, system, nonce, headers, report, semaphore, is_retry=True, twins_by_rep=twins_by_rep)
 
 
-async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvaluation], report: Dict[str, Any]) -> None:
+async def annotate_question(
+    question: QuestionSpec,
+    evals: List[SubmissionEvaluation],
+    report: Dict[str, Any],
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> None:
     if not settings.llm_available or report["fatal"] or getattr(question, "execution_mode", "auto") == "static_only":
         return
     eligible = [e for e in evals if e.tab_category in ("GREEN", "BLUE", "GRAY") and e.cheat_type == "NONE"]
@@ -2020,12 +2131,12 @@ async def annotate_question(question: QuestionSpec, evals: List[SubmissionEvalua
     if cur_batch:
         batches.append(cur_batch)
 
-    semaphore = asyncio.Semaphore(max(1, settings.llm_concurrency))
+    sem = semaphore or asyncio.Semaphore(max(1, settings.llm_concurrency))
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=30.0)
     async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds, limits=limits) as client:
         # Warm up cache with batch 0 first, then fan out remaining batches concurrently
-        await _review_batch(client, batches[0], by_roll, system, nonce, headers, report, semaphore, twins_by_rep=twins_by_rep)
+        await _review_batch(client, batches[0], by_roll, system, nonce, headers, report, sem, twins_by_rep=twins_by_rep)
         if len(batches) > 1:
             await asyncio.gather(*(
-                _review_batch(client, b, by_roll, system, nonce, headers, report, semaphore, twins_by_rep=twins_by_rep) for b in batches[1:]
+                _review_batch(client, b, by_roll, system, nonce, headers, report, sem, twins_by_rep=twins_by_rep) for b in batches[1:]
             ))

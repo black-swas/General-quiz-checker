@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -191,6 +192,7 @@ _CHUNK_LOCK = asyncio.Lock()
 # Live activity log so the Laptop UI shows real-time mobile scan events
 _RECENT_EVENTS: List[Dict[str, Any]] = []
 _ACTIVE_TAS: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_TAS_LOCK = threading.Lock()
 
 
 def record_active_ta(session_id: str, ta_name: str, station: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -200,23 +202,25 @@ def record_active_ta(session_id: str, ta_name: str, station: Optional[str] = Non
     if not clean_ta:
         return []
     now = time.time()
-    s_tas = _ACTIVE_TAS.setdefault(session_id, {})
-    s_tas[clean_ta] = {"last_seen": now, "station": station or "Station"}
-    # Evict TAs not seen in last 10 minutes (600s)
-    stale = [k for k, v in s_tas.items() if now - v["last_seen"] > 600]
-    for k in stale:
-        s_tas.pop(k, None)
-    return [{"ta_name": k, "station": v.get("station", "Station"), "last_seen": round(v["last_seen"], 1)} for k, v in s_tas.items()]
+    with _TAS_LOCK:
+        s_tas = _ACTIVE_TAS.setdefault(session_id, {})
+        s_tas[clean_ta] = {"last_seen": now, "station": station or "Station"}
+        # Evict TAs not seen in last 10 minutes (600s)
+        stale = [k for k, v in list(s_tas.items()) if now - v["last_seen"] > 600]
+        for k in stale:
+            s_tas.pop(k, None)
+        return [{"ta_name": k, "station": v.get("station", "Station"), "last_seen": round(v["last_seen"], 1)} for k, v in list(s_tas.items())]
 
 
 def get_active_tas(session_id: str) -> List[Dict[str, Any]]:
     now = time.time()
-    s_tas = _ACTIVE_TAS.get(session_id, {})
-    return [{"ta_name": k, "station": v.get("station", "Station"), "last_seen": round(v["last_seen"], 1)} for k, v in s_tas.items() if now - v.get("last_seen", 0) <= 600]
+    with _TAS_LOCK:
+        s_tas = _ACTIVE_TAS.get(session_id, {})
+        return [{"ta_name": k, "station": v.get("station", "Station"), "last_seen": round(v["last_seen"], 1)} for k, v in list(s_tas.items()) if now - v.get("last_seen", 0) <= 600]
 
 
 def _push_event(kind: str, message: str, session_id: str = "", roll_no: str = "", page_no: int = 0, ta_name: str = "") -> None:
-    _RECENT_EVENTS.insert(0, {
+    ev = {
         "ts": round(time.time(), 2),
         "kind": kind,
         "message": message,
@@ -224,9 +228,11 @@ def _push_event(kind: str, message: str, session_id: str = "", roll_no: str = ""
         "roll_no": roll_no,
         "page_no": page_no,
         "ta_name": ta_name,
-    })
-    if len(_RECENT_EVENTS) > 60:
-        del _RECENT_EVENTS[60:]
+    }
+    with _TAS_LOCK:
+        _RECENT_EVENTS.insert(0, ev)
+        if len(_RECENT_EVENTS) > 100:
+            del _RECENT_EVENTS[100:]
 
 
 def detect_local_wifi_ips() -> List[str]:
@@ -502,7 +508,11 @@ def hub_info(request: Request, _auth: Any = Depends(require_auth)) -> Dict[str, 
 
 
 @app.post("/api/runtime-settings")
-def api_update_runtime_settings(req: RuntimeSettingsUpdateRequest, _auth: Any = Depends(require_auth)) -> Dict[str, Any]:
+def api_update_runtime_settings(
+    req: RuntimeSettingsUpdateRequest,
+    _auth: Any = Depends(require_auth),
+    _loopback: None = Depends(require_loopback_client),
+) -> Dict[str, Any]:
     """Update runtime LLM settings (API key, model, concurrency, batch size, storage folder) on the laptop without restarting."""
     if req.anthropic_api_key is not None and req.anthropic_api_key.strip():
         k = req.anthropic_api_key.strip()
@@ -633,9 +643,22 @@ async def api_test_llm_connection(
 
 
 @app.get("/api/config")
-def public_config() -> Dict[str, Any]:
+def public_config(request: Request) -> Dict[str, Any]:
     runtimes = sandbox_runtimes()
     ips = detect_local_wifi_ips()
+    base_host = request.headers.get("host") or (f"{ips[0]}:{settings.hub_port}" if ips else f"localhost:{settings.hub_port}")
+    scheme = "https" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https" else "http"
+    scanner_url = f"{scheme}://{base_host}/scan"
+    if settings.auth_required and settings.api_auth_token:
+        scanner_url = f"{scanner_url}?token={settings.api_auth_token}"
+
+    is_authed = False
+    try:
+        require_auth(request)
+        is_authed = True
+    except HTTPException:
+        pass
+
     return {
         "version": settings.app_version,
         "is_render": settings.is_render,
@@ -654,9 +677,9 @@ def public_config() -> Dict[str, Any]:
         },
         "plagiarism_enabled": settings.enable_plagiarism,
         "clone_threshold_percent": settings.clone_threshold_percent,
-        "local_ips": ips,
-        "scanner_url": f"http://{ips[0]}:{settings.hub_port}/scan",
-        "storage_dir": str(_storage_root()),
+        "local_ips": ips if is_authed else (ips[:1] if ips else []),
+        "scanner_url": scanner_url,
+        "storage_dir": str(_storage_root()) if is_authed else "[Configured]",
         "limits": {
             "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
             "max_students": settings.max_students_per_session,
@@ -665,44 +688,6 @@ def public_config() -> Dict[str, Any]:
             "test_timeout_seconds": settings.test_timeout_seconds,
             "chunk_size_bytes": settings.chunk_size_bytes,
         },
-    }
-
-
-@app.get("/api/polyglot/benchmark-results")
-def api_polyglot_benchmark_results() -> Dict[str, Any]:
-    """Returns the latest HumanEval-X Polyglot benchmark report and iteration history."""
-    from pathlib import Path
-    runs_dir = Path(__file__).resolve().parent.parent / "data" / "benchmark_runs"
-    history: List[Dict[str, Any]] = []
-    latest_run: Optional[Dict[str, Any]] = None
-
-    if runs_dir.is_dir():
-        for run_file in sorted(runs_dir.glob("run_iter_*.json")):
-            try:
-                with open(run_file, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                    summary = {
-                        "iteration": data.get("iteration", 0),
-                        "timestamp": data.get("timestamp", ""),
-                        "num_samples_per_lang": data.get("num_samples_per_lang", 0),
-                        "total_tasks": data.get("total_tasks", 0),
-                        "total_passed": data.get("total_passed", 0),
-                        "overall_accuracy_pct": data.get("overall_accuracy_pct", 0.0),
-                        "total_wall_clock_sec": data.get("total_wall_clock_sec", 0.0),
-                        "per_language_stats": data.get("per_language_stats", {}),
-                        "filename": run_file.name,
-                    }
-                    history.append(summary)
-                    latest_run = data
-            except Exception:
-                pass
-
-    return {
-        "status": "success",
-        "runtimes": sandbox_runtimes(),
-        "latest": latest_run,
-        "history": sorted(history, key=lambda x: (x["iteration"], x["total_tasks"])),
-        "available_datasets": ["python", "cpp", "js", "go", "java"],
     }
 
 
@@ -941,10 +926,10 @@ def api_add_student(session_id: str, req: AddStudentRequest, _auth: Any = Depend
         raise HTTPException(404, f"Session '{session_id}' not found.")
     clean_roll = req.roll_no.strip()
     roster_rolls = [s["roll_no"] for s in (session.get("students") or [])]
-    if roster_rolls:
-        reconciled, conf, matched = reconcile_roll_number(clean_roll, roster_rolls)
-        if matched and conf >= 0.85:
-            clean_roll = reconciled
+    for r in roster_rolls:
+        if r.strip().casefold() == clean_roll.casefold():
+            clean_roll = r
+            break
     student = upsert_session_student(session_id, clean_roll, req.student_name)
     return {"status": "ok", "student": student}
 
@@ -1057,14 +1042,23 @@ async def _ingest_complete_page_bytes(
     raw_path = raw_dir / f"page_{page_no}.jpg"
     proc_path = proc_dir / f"page_{page_no}_flattened.jpg"
 
-    tmp_raw_path = raw_dir / f"page_{page_no}.tmp.{uuid.uuid4().hex}.jpg"
+    u_tag = uuid.uuid4().hex
+    tmp_raw_path = raw_dir / f"tmp_{u_tag}_page_{page_no}.jpg"
+    tmp_proc_path = proc_dir / f"tmp_{u_tag}_page_{page_no}_flattened.jpg"
+    tmp_top_path = proc_dir / f"tmp_{u_tag}_page_{page_no}_top.jpg"
+    tmp_bot_path = proc_dir / f"tmp_{u_tag}_page_{page_no}_bottom.jpg"
+
     tmp_raw_path.write_bytes(raw_bytes)
-    os.replace(tmp_raw_path, raw_path)
     sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
 
     try:
-        cv_info = await asyncio.to_thread(process_and_save_page, raw_path, proc_path)
+        cv_info = await asyncio.to_thread(process_and_save_page, tmp_raw_path, tmp_proc_path)
     except Exception as exc:
+        for p in (tmp_raw_path, tmp_proc_path, tmp_top_path, tmp_bot_path):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
         logger.error("Failed to process scanned page for %s p%s: %s", roll_no, page_no, exc, exc_info=True)
         raise HTTPException(400, f"Image processing failed: {exc}")
 
@@ -1074,13 +1068,26 @@ async def _ingest_complete_page_bytes(
             old_p = Path(existing_rec["processed_path"])
             if old_p.is_file() and existing_rec.get("blur_score", 0.0) > cv_info["blur_score"]:
                 old_img = cv2.imread(str(old_p))
-                curr_img = cv2.imread(str(proc_path))
+                curr_img = cv2.imread(str(tmp_proc_path))
                 if old_img is not None and curr_img is not None:
                     h_old = compute_perceptual_hash(old_img)
                     h_curr = compute_perceptual_hash(curr_img)
                     if is_duplicate_scan_frame(h_old, h_curr, max_hamming_distance=5):
                         logger.info("Retake has lower sharpness than existing identical frame; keeping existing")
+                        for p in (tmp_raw_path, tmp_proc_path, tmp_top_path, tmp_bot_path):
+                            try:
+                                p.unlink(missing_ok=True)
+                            except Exception:
+                                pass
                         return existing_rec
+
+    # Retake accepted or not a retake: promote tmp files to real paths
+    os.replace(tmp_raw_path, raw_path)
+    os.replace(tmp_proc_path, proc_path)
+    if tmp_top_path.is_file():
+        os.replace(tmp_top_path, proc_dir / f"page_{page_no}_top.jpg")
+    if tmp_bot_path.is_file():
+        os.replace(tmp_bot_path, proc_dir / f"page_{page_no}_bottom.jpg")
 
     questions_on_page = [q for q in (session.get("questions") or []) if int(q.get("page_number", 1)) == int(page_no)]
     cropped_qids: List[str] = []
@@ -1145,7 +1152,7 @@ async def api_upload_page_direct(
     # Automatically render requested page from PDF if a PDF file was uploaded
     if is_pdf_buffer(data) or (file.filename and file.filename.lower().endswith(".pdf")):
         try:
-            rendered = render_pdf_to_images(data, scale=1.0)
+            rendered = await asyncio.to_thread(render_pdf_to_images, data, 2.0)
             target_idx = max(0, min(page_no - 1, len(rendered) - 1))
             data = rendered[target_idx][1]
         except Exception as exc:
@@ -1170,9 +1177,14 @@ async def api_upload_bulk(
         raise HTTPException(404, f"Session '{session_id}' not found.")
 
     spooled: List[Tuple[str, bytes]] = []
+    total_bulk_bytes = 0
+    max_bulk_allowed = settings.max_upload_bytes + 4 * 1024 * 1024
     for f in files:
         content = await f.read()
         if content:
+            total_bulk_bytes += len(content)
+            if total_bulk_bytes > max_bulk_allowed:
+                raise HTTPException(413, f"Total bulk upload payload exceeds {max_bulk_allowed // (1024 * 1024)} MB limit.")
             spooled.append((f.filename or "file", content))
 
     if not spooled:
@@ -1226,10 +1238,16 @@ async def api_upload_page_chunk(
     _auth: Any = Depends(require_auth),
 ) -> Dict[str, Any]:
     """Failure-resistant 64 KB chunked background sync endpoint for offline-first mobile scanning."""
+    if req.chunk_index < 0 or req.total_chunks <= 0 or req.chunk_index >= req.total_chunks or req.total_chunks > 1000:
+        raise HTTPException(400, f"Invalid chunk index {req.chunk_index} for total_chunks {req.total_chunks}.")
+
     try:
         chunk_bytes = base64.b64decode(req.chunk_base64)
     except Exception:
         raise HTTPException(400, "Invalid base64 chunk payload.")
+
+    if len(chunk_bytes) > 256 * 1024:
+        raise HTTPException(400, "Chunk payload exceeds 256 KB limit.")
 
     key = f"{session_id}:{req.upload_id}"
     assembled: Optional[bytes] = None
@@ -1241,12 +1259,25 @@ async def api_upload_page_chunk(
             _CHUNK_BUFFERS.pop(sk, None)
             _CHUNK_BUFFERS_TIMESTAMPS.pop(sk, None)
 
+        if key not in _CHUNK_BUFFERS and req.chunk_index > 0:
+            raise HTTPException(
+                status_code=410,
+                detail={"error": "Chunk buffer expired or missing; restart upload from chunk 0.", "retry_from_start": True},
+            )
+
         buf = _CHUNK_BUFFERS.setdefault(key, {})
         _CHUNK_BUFFERS_TIMESTAMPS[key] = now
         buf[req.chunk_index] = chunk_bytes
+
+        curr_total_bytes = sum(len(c) for c in buf.values())
+        if curr_total_bytes > settings.max_single_file_bytes + 1024 * 1024:
+            _CHUNK_BUFFERS.pop(key, None)
+            _CHUNK_BUFFERS_TIMESTAMPS.pop(key, None)
+            raise HTTPException(413, "Total chunk buffer exceeds single-file upload size limit.")
+
         received_count = len(buf)
-        if received_count == req.total_chunks:
-            assembled = b"".join(buf[i] for i in range(req.total_chunks) if i in buf)
+        if received_count == req.total_chunks and all(i in buf for i in range(req.total_chunks)):
+            assembled = b"".join(buf[i] for i in range(req.total_chunks))
             _CHUNK_BUFFERS.pop(key, None)
             _CHUNK_BUFFERS_TIMESTAMPS.pop(key, None)
 
@@ -1258,6 +1289,9 @@ async def api_upload_page_chunk(
             "received_chunks": received_count,
             "total_chunks": req.total_chunks,
         }
+
+    if not validate_image_buffer_integrity(assembled):
+        raise HTTPException(400, "Reassembled page image failed integrity validation (corrupted or truncated image).")
 
     if req.sha256_full:
         actual_sha = hashlib.sha256(assembled).hexdigest()
@@ -1328,18 +1362,22 @@ async def api_rotate_student_page(
     if not raw_path.is_file():
         raise HTTPException(404, "Raw page image file missing on disk.")
 
-    img = cv2.imread(str(raw_path))
-    if img is None:
-        raise HTTPException(400, "Could not decode page image for rotation.")
+    def _do_rotate(p_raw: Path, rot_angle: int) -> None:
+        im = cv2.imread(str(p_raw))
+        if im is None:
+            raise ValueError("Could not decode page image for rotation.")
+        flag = cv2.ROTATE_90_CLOCKWISE
+        if rot_angle == 180:
+            flag = cv2.ROTATE_180
+        elif rot_angle in (270, -90):
+            flag = cv2.ROTATE_90_COUNTERCLOCKWISE
+        rot = cv2.rotate(im, flag)
+        cv2.imwrite(str(p_raw), rot, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
-    rot_flag = cv2.ROTATE_90_CLOCKWISE
-    if angle == 180:
-        rot_flag = cv2.ROTATE_180
-    elif angle in (270, -90):
-        rot_flag = cv2.ROTATE_90_COUNTERCLOCKWISE
-
-    rotated = cv2.rotate(img, rot_flag)
-    cv2.imwrite(str(raw_path), rotated, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    try:
+        await asyncio.to_thread(_do_rotate, raw_path, angle)
+    except Exception as exc:
+        raise HTTPException(400, f"Rotation failed: {exc}")
 
     cv_info = await asyncio.to_thread(process_and_save_page, raw_path, proc_path)
 
@@ -1411,14 +1449,17 @@ def api_get_question_crop_image(
                     crop_path = cf
                     break
     if not crop_path.is_file():
-        # Fall back to processed full page 1 or raw page 1 for single-page exams
-        p1 = _session_storage_root(session) / safe_sid / safe_roll / "processed" / "page_1_flattened.jpg"
-        if p1.is_file():
-            return FileResponse(p1, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
-        p1_raw = _session_storage_root(session) / safe_sid / safe_roll / "raw" / "page_1.jpg"
-        if p1_raw.is_file():
-            return FileResponse(p1_raw, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
-        raise HTTPException(404, "Cropped question image not found.")
+        # Fall back only to the specific page mapped to this question, never blindly to page 1
+        target_q_spec = next((q for q in (session.get("questions") or []) if str(q.get("question_id", "")).strip().casefold() == question_id.strip().casefold()), None)
+        target_page = int(target_q_spec.get("page_number", 1)) if target_q_spec else (1 if len(session.get("questions") or []) <= 1 else -1)
+        if target_page > 0:
+            p_proc = _session_storage_root(session) / safe_sid / safe_roll / "processed" / f"page_{target_page}_flattened.jpg"
+            if p_proc.is_file():
+                return FileResponse(p_proc, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+            p_raw = _session_storage_root(session) / safe_sid / safe_roll / "raw" / f"page_{target_page}.jpg"
+            if p_raw.is_file():
+                return FileResponse(p_raw, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
+        raise HTTPException(404, f"Cropped question image for '{question_id}' not found.")
     return FileResponse(crop_path, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
@@ -1436,7 +1477,12 @@ async def _run_session_async_grading(
             return
         questions = session.get("questions") or []
         if only_question_id:
-            questions = [q for q in questions if str(q.get("question_id")) == only_question_id]
+            matching_q = [q for q in questions if str(q.get("question_id")).strip().casefold() == str(only_question_id).strip().casefold()]
+            if not matching_q:
+                logger.warning("Requested only_question_id='%s' not found in session '%s'; aborting grading run.", only_question_id, session_id)
+                update_exam_session(session_id, status="ACTIVE", grading_stage=f"Question '{only_question_id}' not found in session")
+                return
+            questions = matching_q
         if not questions:
             questions = [{
                 "question_id": "Q1",
@@ -1448,7 +1494,8 @@ async def _run_session_async_grading(
             }]
         students = session.get("students") or []
         if only_roll_no:
-            students = [s for s in students if s["roll_no"] == only_roll_no]
+            target_clean = only_roll_no.strip().casefold()
+            students = [s for s in students if str(s["roll_no"]).strip().casefold() == target_clean]
 
         if not students:
             update_exam_session(session_id, status="ACTIVE", grading_progress=1.0, grading_stage="No student pages to grade yet")
@@ -1559,6 +1606,7 @@ async def _run_session_async_grading(
                 sname = s.get("student_name", "")
                 safe_roll = _safe_segment(roll)
                 student_dir = s_root / safe_sid / safe_roll
+                raw_dir = student_dir / "raw"
                 proc_dir = student_dir / "processed"
                 crops_dir = student_dir / "crops"
                 crops_dir.mkdir(parents=True, exist_ok=True)
@@ -1768,7 +1816,10 @@ async def _run_session_async_grading(
                 upsert_session_student(session_id, s_roll, s.get("student_name", ""), finalized=True, grading_status=status_to_set)
             except Exception:
                 pass
-        update_exam_session(session_id, status="ERROR", grading_stage="Grading encountered an unexpected error")
+        if only_roll_no:
+            update_exam_session(session_id, status="ACTIVE", grading_stage=f"Grading failed for {only_roll_no}")
+        else:
+            update_exam_session(session_id, status="ERROR", grading_stage="Grading encountered an unexpected error")
 
 
 @app.post("/api/sessions/{session_id}/finalize-student")
@@ -1796,10 +1847,12 @@ async def api_finalize_student(
     ta_tag = f"TA {req.ta_name}: " if req.ta_name else ""
     _push_event("finalize", f"{ta_tag}Finalized student {req.roll_no} ({req.student_name})", session_id=session_id, roll_no=req.roll_no, ta_name=req.ta_name or "")
     if req.trigger_grading:
-        if session_id not in _session_grading_queues:
-            _session_grading_queues[session_id] = asyncio.Queue()
-        _session_grading_queues[session_id].put_nowait((req.roll_no, None, False))
-        _ensure_session_grading_worker(session_id)
+        full_task_key = f"full_session:{session_id}"
+        if not (full_task_key in _background_tasks and not _background_tasks[full_task_key].done()):
+            if session_id not in _session_grading_queues:
+                _session_grading_queues[session_id] = asyncio.Queue()
+            _session_grading_queues[session_id].put_nowait((req.roll_no, None, False))
+            _ensure_session_grading_worker(session_id)
     return {"status": "finalized", "student": st, "missing_pages": missing_pages, "audit_warnings": audit_warnings}
 
 
@@ -1818,7 +1871,15 @@ async def api_trigger_session_evaluation(
     only_qid = req.only_question_id if req else None
     force_recrop = bool(req.force_regrade) if req else False
 
+    full_task_key = f"full_session:{session_id}"
+
     if only_roll:
+        if full_task_key in _background_tasks and not _background_tasks[full_task_key].done():
+            return {
+                "status": "already_grading",
+                "session_id": session_id,
+                "message": "Full-session grading is already active for this session.",
+            }
         if session_id not in _session_grading_queues:
             _session_grading_queues[session_id] = asyncio.Queue()
         _session_grading_queues[session_id].put_nowait((only_roll, only_qid, force_recrop))
@@ -1830,12 +1891,19 @@ async def api_trigger_session_evaluation(
             "model": settings.primary_model,
         }
 
-    full_task_key = f"full_session:{session_id}"
     if full_task_key in _background_tasks and not _background_tasks[full_task_key].done():
         return {
             "status": "already_grading",
             "session_id": session_id,
             "message": "AI grading is already active for this session.",
+        }
+
+    worker_task = _session_worker_tasks.get(session_id)
+    if worker_task and not worker_task.done():
+        return {
+            "status": "already_grading",
+            "session_id": session_id,
+            "message": "Single-student grading queue is actively processing. Please wait for completion before running full session evaluation.",
         }
 
     update_exam_session(session_id, status="GRADING", grading_progress=0.02, grading_stage="Warming up Prompt Cache & starting concurrent evaluation…")
@@ -1861,12 +1929,22 @@ def api_override_question_grade(
     """Allow TA to approve or override the marks, queue category, and comment for a student's question."""
     if req.ta_id:
         record_active_ta(session_id, req.ta_id)
+    session = get_exam_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Session '{session_id}' not found.")
+    q_max = 100.0
+    for q in session.get("questions", []):
+        if str(q.get("question_id", "")).strip().upper() == str(req.question_id).strip().upper():
+            q_max = float(q.get("max_marks", 5.0))
+            break
+    clamped_marks = max(0.0, min(q_max, float(req.awarded_marks)))
+
     updated = apply_ta_grade_override(
         session_id=session_id,
         roll_no=req.roll_no,
         question_id=req.question_id,
         ta_status=req.ta_status,
-        awarded_marks=req.awarded_marks,
+        awarded_marks=clamped_marks,
         verdict_tab=req.verdict_tab,
         ta_comment=req.ta_comment,
     )
@@ -2032,7 +2110,11 @@ def api_session_analytics(
 
 
 @app.get("/api/sessions/{session_id}/events")
-async def api_session_events(session_id: str, request: Request) -> StreamingResponse:
+async def api_session_events(
+    session_id: str,
+    request: Request,
+    _auth: Any = Depends(require_auth),
+) -> StreamingResponse:
     """Server-Sent Events (SSE) stream for live grading progress and review queue updates."""
     async def event_generator():
         last_prog = None
@@ -2144,7 +2226,7 @@ def api_resolve_regrade(
     _auth: Any = Depends(require_auth),
 ) -> Dict[str, Any]:
     """Resolve a student regrade appeal and auto-override marks if accepted."""
-    ok = resolve_regrade_request(request_id, status=req.status, ta_response=req.ta_response, granted_marks=req.granted_marks)
+    ok = resolve_regrade_request(request_id, status=req.status, ta_response=req.ta_response, granted_marks=req.granted_marks, session_id=session_id)
     if not ok:
         raise HTTPException(404, "Regrade request not found.")
     _push_event("regrade", f"Resolved regrade request #{request_id} as {req.status}", session_id=session_id)
@@ -2512,7 +2594,7 @@ def job_status(job_id: str, _auth: Any = Depends(require_auth)) -> JobStatus:
 
 
 @app.post("/api/jobs/{job_id}/cancel", response_model=JobStatus)
-def cancel_job(job_id: str, _auth: Any = Depends(require_auth)) -> JobStatus:
+async def cancel_job(job_id: str, _auth: Any = Depends(require_auth)) -> JobStatus:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown or expired job.")

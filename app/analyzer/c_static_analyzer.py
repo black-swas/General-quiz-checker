@@ -52,6 +52,31 @@ DANGEROUS_CALLS: Dict[str, str] = {
     "dlsym": "Resolves symbols via dlsym()",
     "syscall": "Invokes raw syscall()",
     "kill": "Invokes kill() on other processes",
+    "WinExec": "Invokes Windows WinExec() process execution",
+    "CreateProcess": "Invokes Windows CreateProcess() process execution",
+    "CreateProcessA": "Invokes Windows CreateProcessA() process execution",
+    "CreateProcessW": "Invokes Windows CreateProcessW() process execution",
+    "ShellExecute": "Invokes Windows ShellExecute() command execution",
+    "ShellExecuteA": "Invokes Windows ShellExecuteA() command execution",
+    "ShellExecuteW": "Invokes Windows ShellExecuteW() command execution",
+    "WSASocket": "Invokes Windows WSASocket() network call",
+    "WSASocketA": "Invokes Windows WSASocket() network call",
+    "WSASocketW": "Invokes Windows WSASocket() network call",
+    "WSAStartup": "Invokes Windows WSAStartup() network initialization",
+    "URLDownloadToFile": "Invokes URLDownloadToFile() network download",
+    "URLDownloadToFileA": "Invokes URLDownloadToFile() network download",
+    "URLDownloadToFileW": "Invokes URLDownloadToFile() network download",
+    "LoadLibrary": "Loads native DLL via LoadLibrary()",
+    "LoadLibraryA": "Loads native DLL via LoadLibraryA()",
+    "LoadLibraryW": "Loads native DLL via LoadLibraryW()",
+    "GetProcAddress": "Resolves native DLL symbols via GetProcAddress()",
+    "TerminateProcess": "Terminates processes via TerminateProcess()",
+}
+
+FORBIDDEN_HEADERS: Set[str] = {
+    "windows.h", "winsock2.h", "wininet.h", "ws2tcpip.h", "tlhelp32.h", "shellapi.h",
+    "sys/socket.h", "netinet/in.h", "arpa/inet.h", "netdb.h", "unistd.h", "sys/ptrace.h",
+    "dlfcn.h", "sys/mman.h", "sys/wait.h", "process.h", "direct.h",
 }
 
 POLYGLOT_DANGEROUS_PATTERNS: List[Tuple[str, str]] = [
@@ -105,7 +130,7 @@ _BASE_CASE_NUMBERS = {"-1", "0", "1", "2", "3"}
 _CONTROL_RE = re.compile(r"\b(?:if|elif|else|while|for|do|switch|case|default|match|when)\b|\?")
 _FUNC_RE = re.compile(
     r"\b(?:static\s+|inline\s+|extern\s+|const\s+|public\s+|private\s+|protected\s+)*(?:unsigned\s+|signed\s+)?"
-    r"(?:long\s+long|long|int|void|float|double|char|short|size_t|bool|_Bool|string|String|auto)"
+    r"(?:struct\s+[A-Za-z_]\w*|union\s+[A-Za-z_]\w*|long\s+long|long|int|void|float|double|char|short|size_t|bool|_Bool|string|String|auto|[A-Za-z_]\w+)"
     r"\b\s*\**\s*([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*([{;])"
 )
 _PY_FUNC_RE = re.compile(r"^([ \t]*)def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->[^:]+)?\s*:", re.M)
@@ -692,6 +717,8 @@ def analyze_includes(stripped: str, language: str = "c") -> Tuple[List[str], Lis
         name = target.group(2) if quoted else target.group(1)
         if name.startswith("/") or ".." in name or (quoted and "/" in name):
             violations.append(f"Forbidden path in #include: {name}")
+        elif name.lower() in FORBIDDEN_HEADERS:
+            violations.append(f"Forbidden system header <{name}> is not permitted")
         elif quoted:
             notes.append(f'Local header "{name}" is not available in single-file submissions')
     return violations, notes
@@ -739,6 +766,32 @@ def check_python_ast_security(raw_code: str) -> List[str]:
     except SyntaxError:
         return []
 
+    module_aliases: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_pkg = alias.name.split(".")[0]
+                local_name = alias.asname or alias.name
+                module_aliases[local_name] = root_pkg
+                if root_pkg in (
+                    "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
+                    "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
+                ):
+                    violations.append(f"Import of restricted system module '{alias.name}'")
+        elif isinstance(node, ast.ImportFrom):
+            root_pkg = (node.module or "").split(".")[0]
+            if root_pkg in (
+                "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
+                "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
+            ):
+                violations.append(f"Import from restricted system module '{node.module}'")
+            elif root_pkg in ("os", "posix", "nt"):
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    if alias.name in ("system", "popen", "environ", "remove", "unlink", "rmdir", "kill", "spawn", "fork"):
+                        violations.append(f"Import of dangerous os function '{alias.name}'")
+                    module_aliases[local_name] = f"os.{alias.name}"
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             # 1. eval / exec / compile
@@ -755,31 +808,17 @@ def check_python_ast_security(raw_code: str) -> List[str]:
             # 3. __import__ call
             elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
                 violations.append("Dynamic module import via __import__() is forbidden")
-            # 4. os / subprocess calls
+            # 4. os / subprocess calls (including aliased imports)
             elif isinstance(node.func, ast.Attribute):
-                if node.func.attr in ("system", "popen", "spawn", "exec", "fork", "kill", "remove", "unlink", "rmdir"):
-                    if isinstance(node.func.value, ast.Name) and node.func.value.id in ("os", "subprocess", "posix"):
-                        violations.append(f"Invokes dangerous process/filesystem call {node.func.value.id}.{node.func.attr}()")
-        # 5. Restricted module imports
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                root_pkg = alias.name.split(".")[0]
-                if root_pkg in (
-                    "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
-                    "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
-                ):
-                    violations.append(f"Import of restricted system module '{alias.name}'")
-        elif isinstance(node, ast.ImportFrom):
-            root_pkg = (node.module or "").split(".")[0]
-            if root_pkg in (
-                "socket", "ctypes", "subprocess", "pty", "shutil", "importlib", "signal",
-                "sqlite3", "urllib", "http", "pathlib", "tempfile", "glob", "pickle", "marshal", "builtins", "inspect"
-            ):
-                violations.append(f"Import from restricted system module '{node.module}'")
-            elif root_pkg == "os":
-                for alias in node.names:
-                    if alias.name in ("system", "popen", "environ", "remove", "unlink", "rmdir", "kill"):
-                        violations.append(f"Import of dangerous os function '{alias.name}'")
+                if node.func.attr in ("system", "popen", "spawn", "exec", "fork", "kill", "remove", "unlink", "rmdir", "startfile"):
+                    val_id = node.func.value.id if isinstance(node.func.value, ast.Name) else ""
+                    resolved_mod = module_aliases.get(val_id, val_id)
+                    if resolved_mod in ("os", "subprocess", "posix", "nt", "sys") or not val_id:
+                        violations.append(f"Invokes dangerous process/filesystem call {val_id or ''}.{node.func.attr}()")
+            elif isinstance(node.func, ast.Name):
+                func_origin = module_aliases.get(node.func.id, "")
+                if func_origin.startswith("os.") or node.func.id in ("system", "popen", "spawn", "fork", "kill", "unlink"):
+                    violations.append(f"Invokes dangerous process/filesystem call {node.func.id}()")
         # 6. __subclasses__ traversal
         elif isinstance(node, ast.Attribute) and node.attr == "__subclasses__":
             violations.append("Sandbox escape attempt via __subclasses__ traversal")
@@ -871,7 +910,17 @@ def _find_spoof_lines(stripped: str, masked: str, question: Optional[QuestionSpe
             # Exclude windows where printf/print only prints a computed variable (e.g. printf("%d", sum))
             if not re.search(r'\bprintf\s*\(\s*"[^"]*%[^"]*"\s*,\s*[A-Za-z_]', window_s):
                 is_compound = len(nums) >= 2 or (nums and words)
-                returns_sample_output = any(out in window_s for out in sample_outputs) if sample_outputs else True
+                returns_sample_output = False
+                for out in sample_outputs:
+                    out_strip = out.strip()
+                    if not out_strip:
+                        continue
+                    esc = re.escape(out_strip)
+                    if (re.search(rf'["\']{esc}(?:\\n)?["\']', window_s)
+                            or (out_strip not in ("0", "1", "-1") and re.search(rf'\breturn\s+{esc}\s*;', window_s))
+                            or re.search(rf'<<\s*["\']?{esc}(?:\\n)?["\']?', window_s)):
+                        returns_sample_output = True
+                        break
                 if is_compound or returns_sample_output:
                     spoof.append(idx + 1)
     return spoof

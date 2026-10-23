@@ -166,6 +166,8 @@ async def run_full_quiz_evaluation(
         )
         return roll, meta, static, gcc
 
+    shared_llm_sem = asyncio.Semaphore(max(1, settings.llm_concurrency))
+
     async def evaluate_question(q) -> Tuple[str, List[SubmissionEvaluation]]:
         nonlocal llm_seconds
         todo = [(r, students[r][q.question_id]) for r in rolls if q.question_id in students[r]]
@@ -186,15 +188,20 @@ async def run_full_quiz_evaluation(
         if settings.llm_available:
             notify("Reviewing with AI evaluator", 0.88, f"{q.question_id}: reviewing {len(results)} submissions")
             t_llm = time.perf_counter()
-            await annotate_question(q, results, llm_report)
+            await annotate_question(q, results, llm_report, semaphore=shared_llm_sem)
             llm_seconds += time.perf_counter() - t_llm
         return q.question_id, results
 
     for qid, q_results in await asyncio.gather(*(evaluate_question(q) for q in questions)):
         evaluations[qid] = q_results
 
-    # Await global plagiarism analysis once, concurrently alongside question evaluations
-    clones_by_q, previews_by_q, corroborated_pairs, collusion_pairs, style_notes_by_sub, stylometry_warnings = await plag_task
+    # Await global plagiarism analysis once, safely without discarding completed evaluations on error
+    try:
+        clones_by_q, previews_by_q, corroborated_pairs, collusion_pairs, style_notes_by_sub, stylometry_warnings = await plag_task
+    except Exception as plag_err:
+        import logging
+        logging.getLogger("iiserb.pipeline").warning("Plagiarism analysis exception caught safely: %s", plag_err)
+        clones_by_q, previews_by_q, corroborated_pairs, collusion_pairs, style_notes_by_sub, stylometry_warnings = {}, {}, 0, [], {}, []
 
     # Post-evaluation plagiarism integration: merge clone matches and stylometry notes
     if settings.enable_plagiarism:
@@ -209,7 +216,7 @@ async def run_full_quiz_evaluation(
                     ev.max_clone_similarity = max((c.similarity_percent for c in c_matches), default=0.0)
                     ev.integrity_notes.extend(_clone_notes(c_matches))
                     strong = [c for c in c_matches if c.strength == "STRONG"]
-                    if strong and ev.tab_category in ("GREEN", "BLUE"):
+                    if strong and ev.tab_category in ("GREEN", "BLUE", "GRAY"):
                         top = max(strong, key=lambda c: c.similarity_percent)
                         ev.tab_category = "RED"
                         ev.verdict_badge = f"Strong Clone Match ({top.similarity_percent}% with {top.partner_roll_no})"

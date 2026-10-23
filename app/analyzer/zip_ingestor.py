@@ -198,7 +198,7 @@ def detect_language(filename: str, code: str = "") -> str:
         return "python"
     if re.search(r"\bpublic\s+(?:static\s+)?(?:class|void\s+main)\b", sample):
         return "java"
-    if re.search(r"\b(?:SELECT|INSERT\s+INTO|CREATE\s+TABLE|FROM|WHERE|GROUP\s+BY)\b", sample, re.I):
+    if re.search(r"\b(?:SELECT\s+.+\s+FROM|INSERT\s+INTO|CREATE\s+TABLE|DELETE\s+FROM|UPDATE\s+\w+\s+SET|GROUP\s+BY\b|ORDER\s+BY\b)", sample, re.I):
         return "sql"
     if re.search(r"\b(?:function\s+\w+\s*\(|const\s+\w+\s*=\s*\(|console\.log\s*\()", sample):
         return "javascript"
